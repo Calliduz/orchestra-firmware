@@ -17,7 +17,7 @@ struct TerminalApiResponse {
     String sectionCode;
 };
 
-class NetworkClient {
+class OrchestraNetworkClient {
 private:
     unsigned long lastWifiCheckTime = 0;
 
@@ -50,7 +50,7 @@ public:
         String url = String(BACKEND_BASE_URL) + "/hardware/status/" + String(TERMINAL_ID);
         http.begin(url);
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(4000);
+        http.setTimeout(8000);
 
         int httpCode = http.GET();
         bool success = false;
@@ -82,7 +82,7 @@ public:
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(4000);
+        http.setTimeout(8000);
 
         JsonDocument reqDoc;
         reqDoc["terminalId"] = TERMINAL_ID;
@@ -129,7 +129,7 @@ public:
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(4000);
+        http.setTimeout(8000);
 
         JsonDocument reqDoc;
         reqDoc["terminalId"] = TERMINAL_ID;
@@ -164,6 +164,6 @@ public:
     }
 };
 
-extern NetworkClient netClient;
+extern OrchestraNetworkClient netClient;
 
 #endif // NETWORK_CLIENT_H

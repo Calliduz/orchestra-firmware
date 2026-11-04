@@ -33,7 +33,7 @@
 // Instantiate Global Singletons
 AudioLedManager audioLed;
 DisplayManager displayMgr;
-NetworkClient netClient;
+OrchestraNetworkClient netClient;
 
 // MFRC522 RFID Hardware Reader Instance
 MFRC522 mfrc522(RC522_SS_PIN, RC522_RST_PIN);

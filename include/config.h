@@ -6,11 +6,11 @@
 // =========================================================================
 // NETWORK & CLOUD BACKEND CONFIGURATION
 // =========================================================================
-#define WIFI_SSID             "ORCHESTRA_LAB_WIFI"
-#define WIFI_PASSWORD         "SecureLabPass2026"
+#define WIFI_SSID             "Copper"
+#define WIFI_PASSWORD         "20220201"
 
 // Local IP or domain of Orchestra Node.js backend server
-#define BACKEND_BASE_URL      "http://192.168.1.100:5000/api/v1"
+#define BACKEND_BASE_URL      "http://192.168.100.159:5000/api/v1"
 
 // Hardware Identity & Security Bearer Token
 #define TERMINAL_ID           "TERM-CL304"
