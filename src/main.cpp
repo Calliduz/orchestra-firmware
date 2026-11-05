@@ -129,18 +129,15 @@ void setup() {
     }
 
     // 4. Initialize Wi-Fi Network Subsystem
-    displayMgr.showConnectingWiFi(WIFI_SSID);
+    displayMgr.showConnectingWiFi("Multi-AP Auto");
     netClient.begin();
 
-    unsigned long wifiConnectStart = millis();
-    while (!netClient.isConnected() && (millis() - wifiConnectStart < 7000)) {
-        delay(250);
-        Serial.print(F("."));
-    }
-    Serial.println();
+    bool wifiConnected = netClient.connectBestNetwork(8000);
 
-    if (netClient.isConnected()) {
-        Serial.printf(F("[WIFI] Uplink established! IP: %s\n"), WiFi.localIP().toString().c_str());
+    if (wifiConnected && netClient.isConnected()) {
+        displayMgr.showConnectingWiFi(WiFi.SSID().c_str());
+        delay(600);
+
         // Sync Initial Session State with Cloud Backend
         bool lockedFromCloud = true;
         String sectionFromCloud = "";

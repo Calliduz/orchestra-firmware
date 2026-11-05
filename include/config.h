@@ -6,11 +6,32 @@
 // =========================================================================
 // NETWORK & CLOUD BACKEND CONFIGURATION
 // =========================================================================
-#define WIFI_SSID             "Copper"
-#define WIFI_PASSWORD         "20220201"
+
+// Structure for multi-network Wi-Fi provisioning
+struct WifiCredential {
+    const char* ssid;
+    const char* password;
+};
+
+// Configured Wi-Fi Access Points (auto-connects to the strongest available network)
+const WifiCredential WIFI_NETWORKS[] = {
+    {"GodCalli",           "notcalli"},
+    {"Copper",             "20220201"},
+    {"iPhone",             "cheesedog1203"},
+    {"Iphone",             "20220201"},
+    {"Jisoo",              "00000000"},
+    {"Lucky 8",            "D@lupang000"},
+    {"IK603B PC (1)",      "QCU.Lab603#"},
+    {"ORCHESTRA_LAB_WIFI", "SecureLabPass2026"}
+};
+const size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+
+// Legacy / fallback defines
+#define WIFI_SSID             WIFI_NETWORKS[0].ssid
+#define WIFI_PASSWORD         WIFI_NETWORKS[0].password
 
 // Local IP or domain of Orchestra Node.js backend server
-#define BACKEND_BASE_URL      "http://192.168.100.159:5000/api/v1"
+#define BACKEND_BASE_URL      "http://10.246.63.20:5000/api/v1"
 
 // Hardware Identity & Security Bearer Token
 #define TERMINAL_ID           "TERM-CL304"
