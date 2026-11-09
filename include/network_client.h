@@ -8,6 +8,8 @@
 #include <vector>
 #include <algorithm>
 #include "esp_wifi.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 #include "config.h"
 
 struct TerminalApiResponse {
@@ -18,6 +20,7 @@ struct TerminalApiResponse {
     String studentId;
     String status;
     String sectionCode;
+    String facultyName;
 };
 
 class OrchestraNetworkClient {
@@ -35,7 +38,7 @@ private:
             .cc = "PH",
             .schan = 1,
             .nchan = 14,
-            .max_tx_power = 20,
+            .max_tx_power = 15,
             .policy = WIFI_COUNTRY_POLICY_MANUAL
         };
         esp_wifi_set_country(&country);
@@ -43,7 +46,9 @@ private:
 
 public:
     void begin() {
+        WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable BOD to prevent Wi-Fi peak current resets
         WiFi.mode(WIFI_STA);
+        WiFi.setTxPower(WIFI_POWER_15dBm);
         configureChannels();
         for (size_t i = 0; i < WIFI_NETWORK_COUNT; i++) {
             Serial.printf("[WIFI] Registered AP [%u]: %s\n", (unsigned)(i + 1), WIFI_NETWORKS[i].ssid);
@@ -55,10 +60,12 @@ public:
     }
 
     bool connectBestNetwork(uint32_t timeoutPerApMs = 8000) {
+        WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
         Serial.println(F("[WIFI] Scanning 2.4GHz Wi-Fi channels (1-14)..."));
         WiFi.disconnect(true);
         delay(100);
         WiFi.mode(WIFI_STA);
+        WiFi.setTxPower(WIFI_POWER_15dBm);
         configureChannels();
 
         int numNetworks = WiFi.scanNetworks(false, false);
@@ -117,6 +124,7 @@ public:
                 if (WiFi.status() == WL_CONNECTED) {
                     Serial.printf(F("[WIFI] Uplink established to '%s'! IP: %s | Channel: %d\n"),
                                   WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.channel());
+                    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
                     return true;
                 } else {
                     Serial.printf(F("[WIFI] Failed to connect to '%s' (status code: %d).\n"), ssid, WiFi.status());
@@ -148,6 +156,7 @@ public:
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.printf(F("[WIFI] Connected via direct association: '%s' | IP: %s\n"),
                               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+                configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
                 return true;
             }
         }
@@ -229,6 +238,7 @@ public:
                 outResponse.studentId = resDoc["data"]["studentId"] | "";
                 outResponse.status = resDoc["data"]["status"] | "";
                 outResponse.sectionCode = resDoc["data"]["sectionCode"] | DEFAULT_SECTION;
+                outResponse.facultyName = resDoc["data"]["facultyName"] | "";
             }
         } else {
             outResponse.code = "ERR_HTTP_FAIL";
@@ -276,6 +286,7 @@ public:
                 outResponse.studentId = resDoc["data"]["studentId"] | "";
                 outResponse.status = resDoc["data"]["status"] | "";
                 outResponse.sectionCode = resDoc["data"]["sectionCode"] | DEFAULT_SECTION;
+                outResponse.facultyName = resDoc["data"]["facultyName"] | "";
             }
         } else {
             outResponse.code = "ERR_HTTP_FAIL";

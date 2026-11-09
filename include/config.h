@@ -15,8 +15,8 @@ struct WifiCredential {
 
 // Configured Wi-Fi Access Points (auto-connects to the strongest available network)
 const WifiCredential WIFI_NETWORKS[] = {
-    {"GodCalli",           "notcalli"},
     {"Copper",             "20220201"},
+    {"GodCalli",           "notcalli"},
     {"iPhone",             "cheesedog1203"},
     {"Iphone",             "20220201"},
     {"Jisoo",              "00000000"},
@@ -31,13 +31,19 @@ const size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0
 #define WIFI_PASSWORD         WIFI_NETWORKS[0].password
 
 // Local IP or domain of Orchestra Node.js backend server
-#define BACKEND_BASE_URL      "http://10.246.63.20:5000/api/v1"
+#define BACKEND_BASE_URL      "http://192.168.100.100:5000/api/v1"
 
 // Hardware Identity & Security Bearer Token
 #define TERMINAL_ID           "TERM-CL304"
 #define HARDWARE_API_KEY      "ORCHESTRA_ESP32_SECURE_TOKEN_2026"
 #define ROOM_NUMBER           "LAB-304"
 #define DEFAULT_SECTION       "AR101-BSIT3A"
+
+// NTP Time Configuration (UTC+8 for Philippines / Asia Manila)
+#define NTP_SERVER_1          "pool.ntp.org"
+#define NTP_SERVER_2          "time.nist.gov"
+#define GMT_OFFSET_SEC        (8 * 3600)
+#define DAYLIGHT_OFFSET_SEC   0
 
 // =========================================================================
 // HARDWARE PIN DEFINITIONS (ESP32-WROOM-32 / NodeMCU-32S)

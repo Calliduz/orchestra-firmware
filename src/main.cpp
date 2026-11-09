@@ -24,6 +24,8 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <Keypad.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 #include "config.h"
 #include "audio_led.h"
@@ -88,11 +90,28 @@ void processRfidCard();
 void handleKeypadInput();
 void handlePacingInterlock();
 String getCardUidHex(MFRC522::Uid *uid);
+void getCurrent12HourClock(char* timeBuf, size_t timeSize, char* dateBuf, size_t dateSize);
+
+// Helper: Extract 12-hour formatted time (AM/PM) and date from RTC / SNTP
+void getCurrent12HourClock(char* timeBuf, size_t timeSize, char* dateBuf, size_t dateSize) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 10)) {
+        int hour12 = timeinfo.tm_hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        const char* ampm = (timeinfo.tm_hour >= 12) ? "PM" : "AM";
+        snprintf(timeBuf, timeSize, "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
+        strftime(dateBuf, dateSize, "%a, %b %d", &timeinfo);
+    } else {
+        timeBuf[0] = '\0';
+        dateBuf[0] = '\0';
+    }
+}
 
 // =========================================================================
 // SYSTEM INITIALIZATION (SETUP)
 // =========================================================================
 void setup() {
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector immediately
     Serial.begin(SERIAL_BAUD_RATE);
     delay(250);
 
@@ -168,7 +187,56 @@ void loop() {
     // 1. Maintain background Wi-Fi connection
     netClient.maintainConnection(now);
 
-    // 2. State Machine Dispatcher
+    // 2. Periodic 1-second display refresh during idle states to keep the 12-hour clock ticking live
+    static unsigned long lastClockTick = 0;
+    if (now - lastClockTick >= 1000) {
+        lastClockTick = now;
+        if (currentState == STATE_LOCKED) {
+            char timeBuf[16] = {0};
+            char dateBuf[24] = {0};
+            getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
+            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf);
+        } else if (currentState == STATE_IDLE_SCAN) {
+            char timeBuf[16] = {0};
+            char dateBuf[24] = {0};
+            getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
+            displayMgr.showIdleScanScreen(currentSectionCode.c_str(), 0, netClient.isConnected(), timeBuf, dateBuf);
+        }
+    }
+
+    // 3. Periodic Cloud Session State Synchronization (Every 2.5s)
+    // Synchronizes remote session termination or activation triggered from the web portal
+    static unsigned long lastSessionSyncTime = 0;
+    if (netClient.isConnected() && (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN)) {
+        if (now - lastSessionSyncTime >= 2500) {
+            lastSessionSyncTime = now;
+            bool cloudIsLocked = isTerminalLocked;
+            String cloudSection = currentSectionCode;
+            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection)) {
+                // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
+                if (!isTerminalLocked && cloudIsLocked) {
+                    Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
+                    isTerminalLocked = true;
+                    audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
+                    displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
+                    stateAfterFeedback = STATE_LOCKED;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                }
+                // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
+                else if (isTerminalLocked && !cloudIsLocked) {
+                    Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
+                    isTerminalLocked = false;
+                    currentSectionCode = cloudSection;
+                    audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
+                    displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
+                    stateAfterFeedback = STATE_IDLE_SCAN;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                }
+            }
+        }
+    }
+
+    // 4. State Machine Dispatcher
     switch (currentState) {
         case STATE_LOCKED: {
             audioLed.setLeds(false, true); // Solid red status LED during locked state
@@ -190,7 +258,19 @@ void loop() {
         }
 
         case STATE_OTP_ENTRY: {
-            handleKeypadInput(); // Keypad buffer accumulation and countdown
+            unsigned long elapsed = now - otpEntryStartTime;
+            if (elapsed >= KEYPAD_OTP_TIMEOUT_MS) {
+                Serial.println(F("[KEYPAD] OTP entry timed out. Reverting to idle."));
+                changeState(STATE_IDLE_SCAN);
+                break;
+            }
+            static unsigned long lastOtpTick = 0;
+            if (now - lastOtpTick >= 1000) {
+                lastOtpTick = now;
+                unsigned long remainingSecs = (KEYPAD_OTP_TIMEOUT_MS - elapsed) / 1000;
+                displayMgr.showKeypadOtpScreen(otpBuffer, otpBufferLength, remainingSecs);
+            }
+            handleKeypadInput();
             break;
         }
 
@@ -214,18 +294,22 @@ void changeState(TerminalState newState) {
     previousState = currentState;
     currentState = newState;
 
+    char timeBuf[16] = {0};
+    char dateBuf[24] = {0};
+    getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
+
     switch (newState) {
         case STATE_LOCKED:
             isTerminalLocked = true;
             audioLed.setLeds(false, true);
-            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER);
+            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf);
             Serial.println(F("[FSM] State -> STATE_LOCKED (Hardware Interlock Armed)"));
             break;
 
         case STATE_IDLE_SCAN:
             isTerminalLocked = false;
             audioLed.setLeds(true, false);
-            displayMgr.showIdleScanScreen(currentSectionCode.c_str(), 0, netClient.isConnected());
+            displayMgr.showIdleScanScreen(currentSectionCode.c_str(), 0, netClient.isConnected(), timeBuf, dateBuf);
             Serial.println(F("[FSM] State -> STATE_IDLE_SCAN (Ingress Matrix Open)"));
             break;
 
@@ -306,7 +390,7 @@ void processRfidCard() {
         isTerminalLocked = false;
         currentSectionCode = response.sectionCode;
         audioLed.cueSessionStateChanged(true);
-        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str());
+        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), response.facultyName.c_str());
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
@@ -326,30 +410,44 @@ void processRfidCard() {
         stateAfterFeedback = STATE_PACING_COOLDOWN; // Activate 3.0s anti-proxy interlock
         changeState(STATE_FEEDBACK_DISPLAY);
     }
+    else if (response.code == "NOT_ENROLLED") {
+        // Student not enrolled in this section
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("NOT ENROLLED", "Not In Course Roster", "Check With Faculty");
+        stateAfterFeedback = STATE_IDLE_SCAN;
+        changeState(STATE_FEEDBACK_DISPLAY);
+    }
+    else if (response.code == "NOT_SESSION_OWNER") {
+        // Another faculty member attempting to close session
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("NOT SESSION OWNER", "Active Session Exists", "Cannot Close Session");
+        stateAfterFeedback = STATE_IDLE_SCAN;
+        changeState(STATE_FEEDBACK_DISPLAY);
+    }
     else if (response.code == "ALREADY_RECORDED") {
         // Anti-passback violation (card already tapped for this session)
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("ANTI-PASSBACK", "ALREADY RECORDED");
+        displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Recorded", "Attendance Logged");
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
     else if (response.code == "SESSION_LOCKED") {
         // Student card presented while terminal is locked
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("TERMINAL LOCKED", "SCAN FACULTY BADGE");
+        displayMgr.showAccessDenied("TERMINAL LOCKED", "Tap Faculty Badge", "To Open Session");
         stateAfterFeedback = STATE_LOCKED;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "UNREGISTERED_TAG") {
+    else if (response.code == "UNREGISTERED_CARD" || response.code == "UNREGISTERED_TAG") {
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("UNREGISTERED", "CARD NOT IN ROSTER");
+        displayMgr.showCardScannedScreen(cardUid.c_str(), false);
         stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
     else {
         // Generic network error or offline fallback
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("COMMUNICATION ERR", response.message.c_str());
+        displayMgr.showAccessDenied("SYSTEM NOTICE", "Tap Again", "Check Connection");
         stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
@@ -413,12 +511,12 @@ void handleKeypadInput() {
                     changeState(STATE_FEEDBACK_DISPLAY);
                 } else if (response.code == "ALREADY_RECORDED") {
                     audioLed.cueAccessDenied();
-                    displayMgr.showAccessDenied("ANTI-PASSBACK", "ALREADY RECORDED");
+                    displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Recorded", "Attendance Logged");
                     stateAfterFeedback = STATE_IDLE_SCAN;
                     changeState(STATE_FEEDBACK_DISPLAY);
                 } else {
                     audioLed.cueAccessDenied();
-                    displayMgr.showAccessDenied("INVALID OTP", response.message.c_str());
+                    displayMgr.showAccessDenied("INVALID OTP", "Code Expired/Wrong", "Generate New PIN");
                     stateAfterFeedback = STATE_IDLE_SCAN;
                     changeState(STATE_FEEDBACK_DISPLAY);
                 }
