@@ -127,15 +127,16 @@ public:
 
         // 2. Link was dropped while previously connected
         if (connState == WIFI_CONN_ACTIVE) {
-            Serial.println(F("[WIFI] Uplink dropped! Transitioning to non-blocking offline failover..."));
+            Serial.println(F("[WIFI] Uplink dropped! Powering down radio for quiet 60s offline operation..."));
             connState = WIFI_CONN_DISCONNECTED;
             currentApIndex = 0;
             lastReconnectSweepTime = now;
             WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF); // Power down 2.4GHz radio to eliminate RF noise on 13.56MHz MFRC522 coil
             return;
         }
 
-        // 3. In-flight Non-blocking Association Attempt
+        // 3. In-flight Non-blocking Association Attempt (Max 2.0s probe)
         if (connState == WIFI_CONN_PROBING) {
             // Succeeded in background
             if (status == WL_CONNECTED) {
@@ -146,45 +147,30 @@ public:
                 return;
             }
 
-            // If connection failed or 3.5s elapsed on this candidate AP:
-            if (status == WL_CONNECT_FAILED || (now - probeStartTime >= 3500)) {
-                Serial.printf("[WIFI] AP [%u/%u] '%s' unreachable or auth rejected.\n",
-                              (unsigned)(currentApIndex + 1), (unsigned)WIFI_NETWORK_COUNT,
-                              WIFI_NETWORKS[currentApIndex].ssid);
-
-                currentApIndex++;
-                if (currentApIndex >= WIFI_NETWORK_COUNT) {
-                    // Entire roster attempted: enter 25s quiet offline cooldown
-                    connState = WIFI_CONN_DISCONNECTED;
-                    currentApIndex = 0;
-                    lastReconnectSweepTime = now;
-                    WiFi.disconnect(true);
-                    Serial.println(F("[WIFI] All configured APs offline. Cooldown for 25s (offline storage active)."));
-                } else {
-                    // Asynchronously initiate handshake with next AP
-                    const char* nextSsid = WIFI_NETWORKS[currentApIndex].ssid;
-                    const char* nextPass = WIFI_NETWORKS[currentApIndex].password;
-                    Serial.printf("[WIFI] Non-blocking probe AP [%u/%u]: '%s'...\n",
-                                  (unsigned)(currentApIndex + 1), (unsigned)WIFI_NETWORK_COUNT, nextSsid);
-                    WiFi.disconnect(false);
-                    WiFi.begin(nextSsid, nextPass);
-                    probeStartTime = now;
-                }
+            // If connection failed or 2.0s elapsed:
+            if (status == WL_CONNECT_FAILED || (now - probeStartTime >= 2000)) {
+                // Enter quiet 60-second offline sleep; power down radio so RFID runs at peak sensitivity
+                connState = WIFI_CONN_DISCONNECTED;
+                currentApIndex = 0;
+                lastReconnectSweepTime = now;
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+                Serial.println(F("[WIFI] Probe timed out. Radio powered off for 60s cooldown (MFRC522 at max sensitivity)."));
             }
             return;
         }
 
         // 4. Disconnected / Cooldown Period
-        // Triggers a quiet, non-blocking candidate sweep once every 25 seconds
+        // Probes primary AP only once every 60 seconds (97% of time radio is completely dormant)
         if (connState == WIFI_CONN_DISCONNECTED) {
-            if (now - lastReconnectSweepTime >= 25000) {
+            if (now - lastReconnectSweepTime >= 60000) {
                 lastReconnectSweepTime = now;
-                currentApIndex = 0;
-                const char* firstSsid = WIFI_NETWORKS[0].ssid;
-                const char* firstPass = WIFI_NETWORKS[0].password;
-                Serial.printf("[WIFI] Initiating background AP probe: '%s'...\n", firstSsid);
+                const char* primarySsid = WIFI_NETWORKS[0].ssid;
+                const char* primaryPass = WIFI_NETWORKS[0].password;
+                Serial.printf("[WIFI] Waking radio for quick background probe: '%s'...\n", primarySsid);
+                WiFi.mode(WIFI_STA);
                 WiFi.disconnect(false);
-                WiFi.begin(firstSsid, firstPass);
+                WiFi.begin(primarySsid, primaryPass);
                 connState = WIFI_CONN_PROBING;
                 probeStartTime = now;
             }

@@ -153,7 +153,10 @@ void setup() {
     if (mfrcVersion == 0x00 || mfrcVersion == 0xFF) {
         Serial.println(F("[WARNING] MFRC522 communication failed or not connected. Check SPI wiring."));
     } else {
-        Serial.println(F("[HARDWARE] MFRC522 SPI 13.56 MHz Transceiver OK."));
+        // Boost MFRC522 receiver sensitivity to maximum (48 dB) for instant coupling and longer range
+        mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+        mfrc522.PCD_AntennaOn();
+        Serial.println(F("[HARDWARE] MFRC522 13.56MHz Transceiver OK (Antenna Gain set to 48dB MAX)."));
     }
 
     // 4. Initialize Wi-Fi Network Subsystem (Fast Non-blocking probe)
@@ -183,7 +186,10 @@ void setup() {
                           isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF", enrollmentTargetName.c_str());
         }
     } else {
-        Serial.println(F("[WIFI] Operating in OFFLINE STANDBY mode. Local cache active."));
+        // In offline mode: shut down 2.4GHz radio to eliminate electrical noise on MFRC522 antenna
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        Serial.println(F("[WIFI] Operating in OFFLINE STANDBY mode (Radio OFF for pure 13.56MHz RFID sensitivity)."));
     }
 
     // Initial state transition
@@ -548,14 +554,15 @@ void processRfidCard() {
 
     Serial.println();
     Serial.printf(F("[RFID EVENT] Interrogated ISO 14443A Tag: 0x%s\n"), cardUid.c_str());
-    displayMgr.showProcessing("Validating RFID...");
 
-    // If offline / Wi-Fi disconnected, directly invoke offline trust handler
+    // If offline / Wi-Fi disconnected: directly invoke offline trust handler (ZERO intermediate OLED frame lag)
     if (!netClient.isConnected()) {
-        Serial.println(F("[OFFLINE] No Wi-Fi link. Delegating to local offline storage..."));
+        Serial.println(F("[OFFLINE] Fast-path local offline storage validation..."));
         handleOfflineCardTap(cardUid);
         return;
     }
+
+    displayMgr.showProcessing("Validating RFID...");
 
     TerminalApiResponse response;
     bool reqSuccess = netClient.postRfidTap(cardUid, response);
