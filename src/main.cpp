@@ -478,7 +478,21 @@ void handleOfflineCardTap(const String &cardUid) {
             stateAfterFeedback = STATE_IDLE_SCAN;
             changeState(STATE_FEEDBACK_DISPLAY);
         } else {
-            // LOCK & CLOSE OFFLINE SESSION
+            // LOCK & CLOSE OFFLINE SESSION: Enforce Session Ownership!
+            // Professor 2 cannot terminate Professor 1's session (only initiating prof or ADMIN)
+            String initiatingUid = offlineStorage.getOfflineFacultyUid();
+            String cleanUid = OfflineStorageManager::normalizeUid(cardUid);
+
+            if (profRole != "ADMIN" && initiatingUid.length() > 0 && !cleanUid.equalsIgnoreCase(initiatingUid)) {
+                Serial.printf(F("[SECURITY OFFLINE] Session was opened by Prof 0x%s. Denied close attempt by 0x%s\n"),
+                              initiatingUid.c_str(), cleanUid.c_str());
+                audioLed.cueAccessDenied();
+                displayMgr.showAccessDenied("NOT OWNER", "Session Owned By", "Another Professor");
+                stateAfterFeedback = STATE_IDLE_SCAN;
+                changeState(STATE_FEEDBACK_DISPLAY);
+                return;
+            }
+
             isTerminalLocked = true;
             offlineStorage.markOfflineSessionClosed(cardUid);
             audioLed.cueSessionStateChanged(false);
