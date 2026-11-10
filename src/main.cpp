@@ -513,10 +513,24 @@ void handleOfflineCardTap(const String &cardUid) {
         return;
     }
 
-    // Terminal is OPEN: Student ingress offline!
+    // Terminal is OPEN: Verify student credentials against local enrollment roster
+    String sName, sId;
+    bool isStudent = offlineStorage.findStudent(cardUid, sName, sId);
+
+    // STRICT DEFENSE: Unregistered, unidentified, or foreign NFC cards are REJECTED!
+    if (!isStudent) {
+        Serial.printf(F("[SECURITY OFFLINE] Unregistered or foreign NFC card 0x%s REJECTED.\n"), cardUid.c_str());
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("UNREGISTERED TAG", "Badge Not Found", "Register Online");
+        stateAfterFeedback = STATE_IDLE_SCAN;
+        changeState(STATE_FEEDBACK_DISPLAY);
+        return;
+    }
+
+    // Local anti-passback defense for verified student
     if (offlineStorage.isAlreadyLogged(cardUid)) {
-        // Local anti-passback defense
-        Serial.printf(F("[ANTI-PASSBACK OFFLINE] 0x%s already in offline buffer!\n"), cardUid.c_str());
+        Serial.printf(F("[ANTI-PASSBACK OFFLINE] Student 0x%s (%s) already logged in buffer!\n"),
+                      cardUid.c_str(), sName.c_str());
         audioLed.cueAccessDenied();
         displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Logged", "In Offline Cache");
         stateAfterFeedback = STATE_IDLE_SCAN;
@@ -524,21 +538,15 @@ void handleOfflineCardTap(const String &cardUid) {
         return;
     }
 
-    // Append to offline queue (NVS backed)
+    // Append authorized student record to offline queue (NVS backed)
     bool saved = offlineStorage.addRecord(cardUid);
     if (saved) {
         audioLed.cueAccessGranted();
 
-        String sName, sId;
-        if (offlineStorage.findStudent(cardUid, sName, sId)) {
-            // Recognized student: Show actual name, student ID, and offline ingress badge!
-            char statBuf[24];
-            snprintf(statBuf, sizeof(statBuf), "OFFLINE (#%d)", offlineStorage.getPendingCount());
-            displayMgr.showAccessGranted(sName.c_str(), statBuf, sId.c_str());
-        } else {
-            // Un-cached UID: display raw UID with pending index
-            displayMgr.showOfflineAttendanceSaved(cardUid.c_str(), offlineStorage.getPendingCount());
-        }
+        // Recognized student: Show actual name, student ID, and offline ingress badge!
+        char statBuf[24];
+        snprintf(statBuf, sizeof(statBuf), "OFFLINE (#%d)", offlineStorage.getPendingCount());
+        displayMgr.showAccessGranted(sName.c_str(), statBuf, sId.c_str());
 
         lastStudentScanTime = millis();
         stateAfterFeedback = STATE_PACING_COOLDOWN; // 3.0s anti-proxy interlock
