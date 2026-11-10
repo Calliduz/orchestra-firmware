@@ -28,13 +28,16 @@ struct TerminalApiResponse {
 
 class OrchestraNetworkClient {
 private:
-    unsigned long lastWifiCheckTime = 0;
-
-    struct Candidate {
-        int indexInConfig;
-        int rssi;
-        String ssid;
+    enum WifiConnState {
+        WIFI_CONN_DISCONNECTED, // In cooldown between reconnect sweeps (zero radio/CPU usage)
+        WIFI_CONN_PROBING,      // Asynchronously connecting to current candidate AP
+        WIFI_CONN_ACTIVE        // Uplink established and confirmed
     };
+
+    WifiConnState connState = WIFI_CONN_DISCONNECTED;
+    size_t currentApIndex = 0;
+    unsigned long probeStartTime = 0;
+    unsigned long lastReconnectSweepTime = 0;
 
     void configureChannels() {
         wifi_country_t country = {
@@ -50,8 +53,10 @@ private:
 public:
     void begin() {
         WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable BOD to prevent Wi-Fi peak current resets
+        WiFi.persistent(false);                     // Do not wear flash NVS on Wi-Fi state shifts
         WiFi.mode(WIFI_STA);
         WiFi.setTxPower(WIFI_POWER_15dBm);
+        WiFi.setAutoReconnect(false);               // Controlled non-blockingly by firmware state machine
         configureChannels();
         for (size_t i = 0; i < WIFI_NETWORK_COUNT; i++) {
             Serial.printf("[WIFI] Registered AP [%u]: %s\n", (unsigned)(i + 1), WIFI_NETWORKS[i].ssid);
@@ -62,118 +67,126 @@ public:
         return (WiFi.status() == WL_CONNECTED);
     }
 
-    bool connectBestNetwork(uint32_t timeoutPerApMs = 8000) {
-        WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-        Serial.println(F("[WIFI] Scanning 2.4GHz Wi-Fi channels (1-14)..."));
+    /**
+     * Fast boot-time connection attempt (max 2000ms).
+     * If Wi-Fi is available, connects quickly.
+     * If router is off / network down, exits immediately within 2s without freezing boot!
+     */
+    bool quickBootConnect(uint32_t maxWaitMs = 2000) {
+        if (WIFI_NETWORK_COUNT == 0) return false;
+
+        const char* ssid = WIFI_NETWORKS[0].ssid;
+        const char* pass = WIFI_NETWORKS[0].password;
+        Serial.printf("[WIFI BOOT] Probing primary AP '%s' (max %lums)...\n", ssid, (unsigned long)maxWaitMs);
+
         WiFi.disconnect(true);
-        delay(100);
+        delay(60);
         WiFi.mode(WIFI_STA);
-        WiFi.setTxPower(WIFI_POWER_15dBm);
-        configureChannels();
+        WiFi.begin(ssid, pass);
 
-        int numNetworks = WiFi.scanNetworks(false, false);
-        Serial.printf("[WIFI] Scan complete. Found %d networks in vicinity:\n", numNetworks);
-
-        std::vector<Candidate> candidates;
-
-        if (numNetworks > 0) {
-            for (int i = 0; i < numNetworks; i++) {
-                String foundSsid = WiFi.SSID(i);
-                int32_t rssi = WiFi.RSSI(i);
-                wifi_auth_mode_t auth = WiFi.encryptionType(i);
-                Serial.printf("  [%02d] %-22s | RSSI: %4d dBm | Auth: %d\n", i + 1, foundSsid.c_str(), (int)rssi, (int)auth);
-
-                for (size_t c = 0; c < WIFI_NETWORK_COUNT; c++) {
-                    if (foundSsid.equals(WIFI_NETWORKS[c].ssid)) {
-                        candidates.push_back({(int)c, (int)rssi, foundSsid});
-                        break;
-                    }
-                }
-            }
-            WiFi.scanDelete();
-        }
-
-        // Sort matched networks by strongest signal
-        if (!candidates.empty()) {
-            std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) {
-                return a.rssi > b.rssi;
-            });
-
-            Serial.printf("[WIFI] Found %u matching AP(s) from configured roster:\n", candidates.size());
-            for (const auto &cand : candidates) {
-                Serial.printf("  -> Candidate '%s' (RSSI: %d dBm)\n", cand.ssid.c_str(), cand.rssi);
-            }
-
-            for (const auto &cand : candidates) {
-                const char* ssid = WIFI_NETWORKS[cand.indexInConfig].ssid;
-                const char* pass = WIFI_NETWORKS[cand.indexInConfig].password;
-
-                Serial.printf("[WIFI] Attempting connection to '%s'...\n", ssid);
-                WiFi.disconnect(true);
-                delay(100);
-                WiFi.begin(ssid, pass);
-
-                unsigned long start = millis();
-                while (WiFi.status() != WL_CONNECTED && (millis() - start < timeoutPerApMs)) {
-                    delay(250);
-                    Serial.print(F("."));
-                    if (WiFi.status() == WL_CONNECT_FAILED) {
-                        Serial.println(F("\n[WIFI] Handshake failed (bad credentials or auth rejection)."));
-                        break;
-                    }
-                }
-                Serial.println();
-
-                if (WiFi.status() == WL_CONNECTED) {
-                    Serial.printf(F("[WIFI] Uplink established to '%s'! IP: %s | Channel: %d\n"),
-                                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.channel());
-                    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
-                    return true;
-                } else {
-                    Serial.printf(F("[WIFI] Failed to connect to '%s' (status code: %d).\n"), ssid, WiFi.status());
-                }
-            }
-        }
-
-        // Direct fallback: try each configured network in order (handles hidden SSIDs / unresponsive scans)
-        Serial.println(F("[WIFI] Trying direct association on configured APs..."));
-        for (size_t i = 0; i < WIFI_NETWORK_COUNT; i++) {
-            const char* ssid = WIFI_NETWORKS[i].ssid;
-            const char* pass = WIFI_NETWORKS[i].password;
-
-            Serial.printf("[WIFI] Direct try: '%s'...\n", ssid);
-            WiFi.disconnect(true);
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && (millis() - start < maxWaitMs)) {
             delay(100);
-            WiFi.begin(ssid, pass);
-
-            unsigned long start = millis();
-            while (WiFi.status() != WL_CONNECTED && (millis() - start < timeoutPerApMs)) {
-                delay(250);
-                Serial.print(F("."));
-                if (WiFi.status() == WL_CONNECT_FAILED) {
-                    break;
-                }
-            }
-            Serial.println();
-
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.printf(F("[WIFI] Connected via direct association: '%s' | IP: %s\n"),
-                              WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-                configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
-                return true;
-            }
+            if (WiFi.status() == WL_CONNECT_FAILED) break;
         }
 
-        Serial.println(F("[WIFI] Unable to establish connection to any configured AP."));
+        if (WiFi.status() == WL_CONNECTED) {
+            connState = WIFI_CONN_ACTIVE;
+            Serial.printf("[WIFI BOOT] Connected to '%s'! IP: %s\n",
+                          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+            configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+            return true;
+        }
+
+        Serial.println(F("[WIFI BOOT] No immediate uplink. Entering OFFLINE STANDBY mode immediately."));
+        WiFi.disconnect(true);
+        connState = WIFI_CONN_DISCONNECTED;
+        lastReconnectSweepTime = millis();
         return false;
     }
 
+    /**
+     * 100% NON-BLOCKING Wi-Fi Connection & Failover State Machine.
+     * ZERO delay(), ZERO while() loops, ZERO synchronous scans!
+     * Executes in microseconds on every loop() pass, keeping RFID scanning
+     * and keypad polling running at maximum speed even during network outages.
+     */
     void maintainConnection(unsigned long now) {
-        if (!isConnected()) {
-            if (now - lastWifiCheckTime >= WIFI_RECONNECT_INTERVAL_MS) {
-                lastWifiCheckTime = now;
-                Serial.println(F("[WIFI] Disconnected from AP. Re-initiating failover connection..."));
-                connectBestNetwork(6000);
+        wl_status_t status = WiFi.status();
+
+        // 1. Currently Active Link
+        if (status == WL_CONNECTED) {
+            if (connState != WIFI_CONN_ACTIVE) {
+                connState = WIFI_CONN_ACTIVE;
+                Serial.printf(F("[WIFI] Background uplink established to '%s'! IP: %s\n"),
+                              WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+                configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+            }
+            return;
+        }
+
+        // 2. Link was dropped while previously connected
+        if (connState == WIFI_CONN_ACTIVE) {
+            Serial.println(F("[WIFI] Uplink dropped! Transitioning to non-blocking offline failover..."));
+            connState = WIFI_CONN_DISCONNECTED;
+            currentApIndex = 0;
+            lastReconnectSweepTime = now;
+            WiFi.disconnect(true);
+            return;
+        }
+
+        // 3. In-flight Non-blocking Association Attempt
+        if (connState == WIFI_CONN_PROBING) {
+            // Succeeded in background
+            if (status == WL_CONNECTED) {
+                connState = WIFI_CONN_ACTIVE;
+                Serial.printf(F("[WIFI] Reconnected to '%s'! IP: %s\n"),
+                              WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+                configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+                return;
+            }
+
+            // If connection failed or 3.5s elapsed on this candidate AP:
+            if (status == WL_CONNECT_FAILED || (now - probeStartTime >= 3500)) {
+                Serial.printf("[WIFI] AP [%u/%u] '%s' unreachable or auth rejected.\n",
+                              (unsigned)(currentApIndex + 1), (unsigned)WIFI_NETWORK_COUNT,
+                              WIFI_NETWORKS[currentApIndex].ssid);
+
+                currentApIndex++;
+                if (currentApIndex >= WIFI_NETWORK_COUNT) {
+                    // Entire roster attempted: enter 25s quiet offline cooldown
+                    connState = WIFI_CONN_DISCONNECTED;
+                    currentApIndex = 0;
+                    lastReconnectSweepTime = now;
+                    WiFi.disconnect(true);
+                    Serial.println(F("[WIFI] All configured APs offline. Cooldown for 25s (offline storage active)."));
+                } else {
+                    // Asynchronously initiate handshake with next AP
+                    const char* nextSsid = WIFI_NETWORKS[currentApIndex].ssid;
+                    const char* nextPass = WIFI_NETWORKS[currentApIndex].password;
+                    Serial.printf("[WIFI] Non-blocking probe AP [%u/%u]: '%s'...\n",
+                                  (unsigned)(currentApIndex + 1), (unsigned)WIFI_NETWORK_COUNT, nextSsid);
+                    WiFi.disconnect(false);
+                    WiFi.begin(nextSsid, nextPass);
+                    probeStartTime = now;
+                }
+            }
+            return;
+        }
+
+        // 4. Disconnected / Cooldown Period
+        // Triggers a quiet, non-blocking candidate sweep once every 25 seconds
+        if (connState == WIFI_CONN_DISCONNECTED) {
+            if (now - lastReconnectSweepTime >= 25000) {
+                lastReconnectSweepTime = now;
+                currentApIndex = 0;
+                const char* firstSsid = WIFI_NETWORKS[0].ssid;
+                const char* firstPass = WIFI_NETWORKS[0].password;
+                Serial.printf("[WIFI] Initiating background AP probe: '%s'...\n", firstSsid);
+                WiFi.disconnect(false);
+                WiFi.begin(firstSsid, firstPass);
+                connState = WIFI_CONN_PROBING;
+                probeStartTime = now;
             }
         }
     }
@@ -185,7 +198,7 @@ public:
         String url = String(BACKEND_BASE_URL) + "/hardware/status/" + String(TERMINAL_ID);
         http.begin(url);
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(8000);
+        http.setTimeout(2500);
 
         int httpCode = http.GET();
         bool success = false;
@@ -238,7 +251,7 @@ public:
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(8000);
+        http.setTimeout(2500);
 
         JsonDocument reqDoc;
         reqDoc["terminalId"] = TERMINAL_ID;
@@ -288,7 +301,7 @@ public:
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
-        http.setTimeout(8000);
+        http.setTimeout(2500);
 
         JsonDocument reqDoc;
         reqDoc["terminalId"] = TERMINAL_ID;

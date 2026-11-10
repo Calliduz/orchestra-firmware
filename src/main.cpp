@@ -156,15 +156,15 @@ void setup() {
         Serial.println(F("[HARDWARE] MFRC522 SPI 13.56 MHz Transceiver OK."));
     }
 
-    // 4. Initialize Wi-Fi Network Subsystem
-    displayMgr.showConnectingWiFi("Multi-AP Auto");
+    // 4. Initialize Wi-Fi Network Subsystem (Fast Non-blocking probe)
+    displayMgr.showConnectingWiFi("Probing Uplink...");
     netClient.begin();
 
-    bool wifiConnected = netClient.connectBestNetwork(8000);
+    bool wifiConnected = netClient.quickBootConnect(2000);
 
     if (wifiConnected && netClient.isConnected()) {
         displayMgr.showConnectingWiFi(WiFi.SSID().c_str());
-        delay(600);
+        delay(400);
 
         // Sync Initial Session State with Cloud Backend
         bool lockedFromCloud = true;
@@ -183,7 +183,7 @@ void setup() {
                           isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF", enrollmentTargetName.c_str());
         }
     } else {
-        Serial.println(F("[WIFI] Connection timed out. Operating in offline standby mode."));
+        Serial.println(F("[WIFI] Operating in OFFLINE STANDBY mode. Local cache active."));
     }
 
     // Initial state transition
@@ -213,7 +213,7 @@ void loop() {
             char timeBuf[16] = {0};
             char dateBuf[24] = {0};
             getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
-            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf);
+            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf, netClient.isConnected());
         } else if (currentState == STATE_IDLE_SCAN) {
             char timeBuf[16] = {0};
             char dateBuf[24] = {0};
@@ -384,7 +384,7 @@ void changeState(TerminalState newState) {
         case STATE_LOCKED:
             isTerminalLocked = true;
             audioLed.setLeds(false, true);
-            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf);
+            displayMgr.showLockedScreen(TERMINAL_ID, ROOM_NUMBER, timeBuf, dateBuf, netClient.isConnected());
             Serial.println(F("[FSM] State -> STATE_LOCKED (Hardware Interlock Armed)"));
             break;
 
@@ -680,11 +680,19 @@ void handleKeypadInput() {
         // '#' acts as submit/commit when 6 digits are buffered
         else if (key == '#') {
             if (otpBufferLength == 6) {
+                if (!netClient.isConnected()) {
+                    audioLed.cueAccessDenied();
+                    displayMgr.showAccessDenied("OFFLINE MODE", "OTP Requires", "Active Wi-Fi Link");
+                    stateAfterFeedback = STATE_IDLE_SCAN;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                    return;
+                }
+
                 Serial.printf(F("[KEYPAD] Submitting 6-Digit OTP: %s\n"), otpBuffer);
                 displayMgr.showProcessing("Validating OTP...");
 
                 TerminalApiResponse response;
-                bool success = netClient.postKeypadOtp(String(otpBuffer), response);
+                netClient.postKeypadOtp(String(otpBuffer), response);
 
                 if (response.code == "ACCESS_GRANTED") {
                     audioLed.cueAccessGranted();

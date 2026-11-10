@@ -110,7 +110,7 @@ public:
     /**
      * Idle Screen when Session is Locked: Displays 12-hour clock, date, room, and prompt
      */
-    void showLockedScreen(const char* terminalId, const char* room, const char* timeStr = nullptr, const char* dateStr = nullptr) {
+    void showLockedScreen(const char* terminalId, const char* room, const char* timeStr = nullptr, const char* dateStr = nullptr, bool wifiOk = true) {
         display.clearDisplay();
 
         // Top Status Strip (Inverted)
@@ -119,8 +119,8 @@ public:
         display.setTextSize(1);
         display.setCursor(4, 2);
         display.print(F("ORCHESTRA"));
-        display.setCursor(76, 2);
-        display.print(F("[LOCKED]"));
+        display.setCursor(wifiOk ? 76 : 70, 2);
+        display.print(wifiOk ? F("[LOCKED]") : F("[OFFLINE]"));
 
         if (timeStr && strlen(timeStr) > 0) {
             // Live 12-Hour Digital Clock Display (Size 2, 8 chars max: e.g. "12:45 PM")
@@ -132,12 +132,12 @@ public:
             }
         } else {
             printCentered("TERMINAL LOCKED", 20, 1, SSD1306_WHITE, 18);
-            printCentered("Awaiting Faculty", 34, 1, SSD1306_WHITE, 18);
+            printCentered(wifiOk ? "Awaiting Faculty" : "Offline Standby", 34, 1, SSD1306_WHITE, 18);
         }
 
         // Bottom Strip: Clear Prompt
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        printCentered("TAP FACULTY BADGE", 50, 1, SSD1306_WHITE, 18);
+        printCentered(wifiOk ? "TAP FACULTY BADGE" : "TAP PROF BADGE (OFF)", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
