@@ -177,7 +177,7 @@ public:
         }
     }
 
-    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole) {
+    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole, String &targetName) {
         if (!isConnected()) return false;
 
         HTTPClient http;
@@ -198,6 +198,7 @@ public:
                 sectionCode = doc["session"]["sectionCode"] | DEFAULT_SECTION;
                 enrollmentActive = doc["enrollment"]["active"] | false;
                 targetRole = doc["enrollment"]["targetRole"] | "STUDENT";
+                targetName = doc["enrollment"]["targetName"] | "";
                 success = true;
             }
         }

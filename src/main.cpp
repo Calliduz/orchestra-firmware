@@ -76,6 +76,7 @@ TerminalState stateAfterFeedback = STATE_LOCKED;
 bool isTerminalLocked = true;
 bool isEnrollmentMode = false;
 String enrollmentTargetRole = "STUDENT";
+String enrollmentTargetName = "";
 String currentSectionCode = DEFAULT_SECTION;
 
 // Pacing Interlock & Non-blocking Timers
@@ -165,14 +166,16 @@ void setup() {
         String sectionFromCloud = "";
         bool enrollFromCloud = false;
         String roleFromCloud = "STUDENT";
-        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud, enrollFromCloud, roleFromCloud)) {
+        String nameFromCloud = "";
+        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud, enrollFromCloud, roleFromCloud, nameFromCloud)) {
             isTerminalLocked = lockedFromCloud;
             currentSectionCode = sectionFromCloud;
             isEnrollmentMode = enrollFromCloud;
             enrollmentTargetRole = roleFromCloud;
-            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s | Enrollment: %s)\n"),
+            enrollmentTargetName = nameFromCloud;
+            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s | Enrollment: %s (%s))\n"),
                           isTerminalLocked ? "LOCKED" : "OPEN", currentSectionCode.c_str(),
-                          isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF");
+                          isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF", enrollmentTargetName.c_str());
         }
     } else {
         Serial.println(F("[WIFI] Connection timed out. Operating in offline standby mode."));
@@ -212,7 +215,7 @@ void loop() {
             getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
             displayMgr.showIdleScanScreen(currentSectionCode.c_str(), 0, netClient.isConnected(), timeBuf, dateBuf);
         } else if (currentState == STATE_ENROLLMENT_SCAN) {
-            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
+            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
         }
     }
 
@@ -226,23 +229,28 @@ void loop() {
             String cloudSection = currentSectionCode;
             bool cloudEnrollmentActive = isEnrollmentMode;
             String cloudTargetRole = enrollmentTargetRole;
+            String cloudTargetName = enrollmentTargetName;
 
-            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole)) {
+            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole, cloudTargetName)) {
                 // CASE 0: Live Admin RFID Enrollment Mode toggled
                 if (!isEnrollmentMode && cloudEnrollmentActive) {
-                    Serial.printf(F("[REMOTE EVENT] Admin initiated RFID Enrollment Mode for %s!\n"), cloudTargetRole.c_str());
+                    Serial.printf(F("[REMOTE EVENT] Admin initiated RFID Enrollment Mode for %s (%s)!\n"),
+                                  cloudTargetRole.c_str(), cloudTargetName.c_str());
                     isEnrollmentMode = true;
                     enrollmentTargetRole = cloudTargetRole;
+                    enrollmentTargetName = cloudTargetName;
                     audioLed.cueAccessGranted();
                     changeState(STATE_ENROLLMENT_SCAN);
                 } else if (isEnrollmentMode && !cloudEnrollmentActive) {
                     Serial.println(F("[REMOTE EVENT] Admin closed RFID Enrollment Mode. Restoring state..."));
                     isEnrollmentMode = false;
+                    enrollmentTargetName = "";
                     audioLed.playKeypadClick();
                     changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
-                } else if (isEnrollmentMode && cloudEnrollmentActive && cloudTargetRole != enrollmentTargetRole) {
+                } else if (isEnrollmentMode && cloudEnrollmentActive && (cloudTargetRole != enrollmentTargetRole || cloudTargetName != enrollmentTargetName)) {
                     enrollmentTargetRole = cloudTargetRole;
-                    displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
+                    enrollmentTargetName = cloudTargetName;
+                    displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
                 }
                 // CASE A & B: Normal Session State Transitions when not in enrollment mode
                 else if (!isEnrollmentMode) {
@@ -368,9 +376,9 @@ void changeState(TerminalState newState) {
 
         case STATE_ENROLLMENT_SCAN:
             audioLed.setLeds(true, true);
-            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
-            Serial.printf(F("[FSM] State -> STATE_ENROLLMENT_SCAN (Live Admin Provisioning for %s)\n"),
-                          enrollmentTargetRole.c_str());
+            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
+            Serial.printf(F("[FSM] State -> STATE_ENROLLMENT_SCAN (Live Admin Provisioning for %s: %s)\n"),
+                          enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
             break;
 
         case STATE_FEEDBACK_DISPLAY:
@@ -472,15 +480,15 @@ void processRfidCard() {
     else if (response.code == "NOT_ENROLLED") {
         // Student not enrolled in this section
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("NOT ENROLLED", "Not In Course Roster", "Check With Faculty");
+        displayMgr.showAccessDenied("NOT ENROLLED", "Not In Class", "Check Faculty");
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "NOT_SESSION_OWNER") {
-        // Another faculty member attempting to close session
+    else if (response.code == "UNAUTHORIZED_FACULTY" || response.code == "NOT_SESSION_OWNER") {
+        // Unauthorized faculty (not assigned to this room/terminal, or attempting to close another's session)
         audioLed.cueAccessDenied();
-        displayMgr.showAccessDenied("NOT SESSION OWNER", "Active Session Exists", "Cannot Close Session");
-        stateAfterFeedback = STATE_IDLE_SCAN;
+        displayMgr.showAccessDenied("UNAUTHORIZED", "Not Assigned", "Wrong Instructor");
+        stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
     else if (response.code == "ALREADY_RECORDED") {

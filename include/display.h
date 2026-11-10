@@ -23,6 +23,7 @@ public:
 
         display.clearDisplay();
         display.setTextColor(SSD1306_WHITE);
+        display.setTextWrap(false);
         display.display();
         return true;
     }
@@ -36,10 +37,11 @@ public:
         display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
         display.setTextSize(1);
+        display.setTextWrap(false);
 
-        char buf[22];
-        strncpy(buf, title, 20);
-        buf[20] = '\0';
+        char buf[20];
+        strncpy(buf, title, 18);
+        buf[18] = '\0';
         int len = strlen(buf);
         int x = (SCREEN_WIDTH - (len * 6)) / 2;
         if (x < 2) x = 2;
@@ -51,19 +53,21 @@ public:
      * Helper to print pixel-perfect centered text on the 128x64 display.
      * Automatically truncates text beyond maxChars to strictly prevent unwanted line wraps.
      */
-    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 20) {
+    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 18) {
         if (!text) return;
 
-        char buf[24];
-        int limit = (size == 2) ? 10 : maxChars;
-        if (limit > 20) limit = 20;
+        char buf[22];
+        int limit = (size == 2) ? 8 : maxChars;
+        if (limit > 18) limit = 18;
         strncpy(buf, text, limit);
         buf[limit] = '\0';
 
-        int16_t x1, y1;
-        uint16_t w, h;
         display.setTextSize(size);
         display.setTextColor(color);
+        display.setTextWrap(false);
+
+        int16_t x1, y1;
+        uint16_t w, h;
         display.getTextBounds(buf, 0, y, &x1, &y1, &w, &h);
         int x = (SCREEN_WIDTH - (int)w) / 2;
         if (x < 0) x = 0;
