@@ -63,6 +63,7 @@ enum TerminalState {
     STATE_IDLE_SCAN,          // Session open, ready to interrogate student credentials
     STATE_PACING_COOLDOWN,    // Non-blocking 3.0s anti-proxy interlock
     STATE_OTP_ENTRY,          // Keypad 6-digit numeric PIN entry mode
+    STATE_ENROLLMENT_SCAN,    // Live admin RFID enrollment mode for new student or faculty
     STATE_PROCESSING,         // Sending REST packet to backend
     STATE_FEEDBACK_DISPLAY    // Temporary result splash before state restoration
 };
@@ -73,6 +74,8 @@ TerminalState previousState = STATE_BOOT;
 TerminalState stateAfterFeedback = STATE_LOCKED;
 
 bool isTerminalLocked = true;
+bool isEnrollmentMode = false;
+String enrollmentTargetRole = "STUDENT";
 String currentSectionCode = DEFAULT_SECTION;
 
 // Pacing Interlock & Non-blocking Timers
@@ -160,18 +163,25 @@ void setup() {
         // Sync Initial Session State with Cloud Backend
         bool lockedFromCloud = true;
         String sectionFromCloud = "";
-        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud)) {
+        bool enrollFromCloud = false;
+        String roleFromCloud = "STUDENT";
+        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud, enrollFromCloud, roleFromCloud)) {
             isTerminalLocked = lockedFromCloud;
             currentSectionCode = sectionFromCloud;
-            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s)\n"),
-                          isTerminalLocked ? "LOCKED" : "OPEN", currentSectionCode.c_str());
+            isEnrollmentMode = enrollFromCloud;
+            enrollmentTargetRole = roleFromCloud;
+            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s | Enrollment: %s)\n"),
+                          isTerminalLocked ? "LOCKED" : "OPEN", currentSectionCode.c_str(),
+                          isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF");
         }
     } else {
         Serial.println(F("[WIFI] Connection timed out. Operating in offline standby mode."));
     }
 
     // Initial state transition
-    if (isTerminalLocked) {
+    if (isEnrollmentMode) {
+        changeState(STATE_ENROLLMENT_SCAN);
+    } else if (isTerminalLocked) {
         changeState(STATE_LOCKED);
     } else {
         changeState(STATE_IDLE_SCAN);
@@ -201,36 +211,60 @@ void loop() {
             char dateBuf[24] = {0};
             getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
             displayMgr.showIdleScanScreen(currentSectionCode.c_str(), 0, netClient.isConnected(), timeBuf, dateBuf);
+        } else if (currentState == STATE_ENROLLMENT_SCAN) {
+            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
         }
     }
 
     // 3. Periodic Cloud Session State Synchronization (Every 2.5s)
-    // Synchronizes remote session termination or activation triggered from the web portal
+    // Synchronizes remote session termination, activation, or admin enrollment mode from the web portal
     static unsigned long lastSessionSyncTime = 0;
-    if (netClient.isConnected() && (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN)) {
+    if (netClient.isConnected() && (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN || currentState == STATE_ENROLLMENT_SCAN)) {
         if (now - lastSessionSyncTime >= 2500) {
             lastSessionSyncTime = now;
             bool cloudIsLocked = isTerminalLocked;
             String cloudSection = currentSectionCode;
-            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection)) {
-                // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
-                if (!isTerminalLocked && cloudIsLocked) {
-                    Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
-                    isTerminalLocked = true;
-                    audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
-                    displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
-                    stateAfterFeedback = STATE_LOCKED;
-                    changeState(STATE_FEEDBACK_DISPLAY);
+            bool cloudEnrollmentActive = isEnrollmentMode;
+            String cloudTargetRole = enrollmentTargetRole;
+
+            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole)) {
+                // CASE 0: Live Admin RFID Enrollment Mode toggled
+                if (!isEnrollmentMode && cloudEnrollmentActive) {
+                    Serial.printf(F("[REMOTE EVENT] Admin initiated RFID Enrollment Mode for %s!\n"), cloudTargetRole.c_str());
+                    isEnrollmentMode = true;
+                    enrollmentTargetRole = cloudTargetRole;
+                    audioLed.cueAccessGranted();
+                    changeState(STATE_ENROLLMENT_SCAN);
+                } else if (isEnrollmentMode && !cloudEnrollmentActive) {
+                    Serial.println(F("[REMOTE EVENT] Admin closed RFID Enrollment Mode. Restoring state..."));
+                    isEnrollmentMode = false;
+                    audioLed.playKeypadClick();
+                    changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
+                } else if (isEnrollmentMode && cloudEnrollmentActive && cloudTargetRole != enrollmentTargetRole) {
+                    enrollmentTargetRole = cloudTargetRole;
+                    displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
                 }
-                // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
-                else if (isTerminalLocked && !cloudIsLocked) {
-                    Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
-                    isTerminalLocked = false;
-                    currentSectionCode = cloudSection;
-                    audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
-                    displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
-                    stateAfterFeedback = STATE_IDLE_SCAN;
-                    changeState(STATE_FEEDBACK_DISPLAY);
+                // CASE A & B: Normal Session State Transitions when not in enrollment mode
+                else if (!isEnrollmentMode) {
+                    // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
+                    if (!isTerminalLocked && cloudIsLocked) {
+                        Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
+                        isTerminalLocked = true;
+                        audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
+                        displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
+                        stateAfterFeedback = STATE_LOCKED;
+                        changeState(STATE_FEEDBACK_DISPLAY);
+                    }
+                    // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
+                    else if (isTerminalLocked && !cloudIsLocked) {
+                        Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
+                        isTerminalLocked = false;
+                        currentSectionCode = cloudSection;
+                        audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
+                        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
+                        stateAfterFeedback = STATE_IDLE_SCAN;
+                        changeState(STATE_FEEDBACK_DISPLAY);
+                    }
                 }
             }
         }
@@ -249,6 +283,12 @@ void loop() {
             audioLed.setLeds(true, false); // Solid green status LED during active scan state
             processRfidCard();             // Scans student badges or faculty badge to close session
             handleKeypadInput();           // '#' key triggers OTP entry mode
+            break;
+        }
+
+        case STATE_ENROLLMENT_SCAN: {
+            audioLed.setLeds(true, true); // Dual solid LEDs indicates admin enrollment mode
+            processRfidCard();            // Scans any RFID tag to link directly to new user
             break;
         }
 
@@ -326,6 +366,13 @@ void changeState(TerminalState newState) {
             Serial.println(F("[FSM] State -> STATE_OTP_ENTRY (Keypad 6-Digit Ingress Mode)"));
             break;
 
+        case STATE_ENROLLMENT_SCAN:
+            audioLed.setLeds(true, true);
+            displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str());
+            Serial.printf(F("[FSM] State -> STATE_ENROLLMENT_SCAN (Live Admin Provisioning for %s)\n"),
+                          enrollmentTargetRole.c_str());
+            break;
+
         case STATE_FEEDBACK_DISPLAY:
             feedbackStartTime = millis();
             Serial.println(F("[FSM] State -> STATE_FEEDBACK_DISPLAY"));
@@ -385,7 +432,19 @@ void processRfidCard() {
     Serial.printf(F("[BACKEND RESPONSE] HTTP %d | Code: %s | Message: %s\n"),
                   response.httpCode, response.code.c_str(), response.message.c_str());
 
-    if (response.code == "SESSION_STARTED") {
+    if (response.code == "ENROLLMENT_CAPTURED") {
+        // Tag captured live for Admin Enrollment Mode
+        audioLed.cueAccessGranted(); // Positive chirp
+        displayMgr.showEnrollmentCapturedScreen(
+            cardUid.c_str(),
+            enrollmentTargetRole.c_str(),
+            response.isRegistered,
+            response.cardHolder.c_str()
+        );
+        stateAfterFeedback = isEnrollmentMode ? STATE_ENROLLMENT_SCAN : (isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
+        changeState(STATE_FEEDBACK_DISPLAY);
+    }
+    else if (response.code == "SESSION_STARTED") {
         // Faculty Master Badge tapped to open session
         isTerminalLocked = false;
         currentSectionCode = response.sectionCode;

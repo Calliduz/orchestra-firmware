@@ -28,15 +28,35 @@ public:
     }
 
     /**
+     * Draw uniform centered inverted top header bar (0..12px height).
+     * Prevents text overflowing right screen border on 128x64 SSD1306 OLED.
+     */
+    void drawHeader(const char* title) {
+        if (!title) return;
+        display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        display.setTextSize(1);
+
+        char buf[22];
+        strncpy(buf, title, 20);
+        buf[20] = '\0';
+        int len = strlen(buf);
+        int x = (SCREEN_WIDTH - (len * 6)) / 2;
+        if (x < 2) x = 2;
+        display.setCursor(x, 2);
+        display.print(buf);
+    }
+
+    /**
      * Helper to print pixel-perfect centered text on the 128x64 display.
      * Automatically truncates text beyond maxChars to strictly prevent unwanted line wraps.
      */
-    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 21) {
+    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 20) {
         if (!text) return;
 
-        char buf[32];
+        char buf[24];
         int limit = (size == 2) ? 10 : maxChars;
-        if (limit > 31) limit = 31;
+        if (limit > 20) limit = 20;
         strncpy(buf, text, limit);
         buf[limit] = '\0';
 
@@ -56,22 +76,15 @@ public:
      */
     void showBootScreen(const char* version = "v1.0.4") {
         display.clearDisplay();
-        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
 
-        // Header
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(16, 3);
-        display.print(F("=== ORCHESTRA ==="));
+        drawHeader("ORCHESTRA NODE");
 
-        // Subtitle
-        printCentered("HARDWARE TRUST NODE", 22, 1, SSD1306_WHITE);
-        printCentered("ESP32 Edge Terminal", 34, 1, SSD1306_WHITE);
+        printCentered("HARDWARE TRUST NODE", 20, 1, SSD1306_WHITE, 19);
+        printCentered("ESP32 Door Terminal", 32, 1, SSD1306_WHITE, 19);
 
-        char verBuf[24];
+        char verBuf[22];
         snprintf(verBuf, sizeof(verBuf), "Firmware %s", version);
-        printCentered(verBuf, 48, 1, SSD1306_WHITE);
+        printCentered(verBuf, 46, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
@@ -81,16 +94,11 @@ public:
      */
     void showConnectingWiFi(const char* ssid) {
         display.clearDisplay();
-        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
 
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(18, 3);
-        display.print(F("NETWORK UPLINK"));
+        drawHeader("NETWORK UPLINK");
 
-        printCentered("Connecting Wi-Fi...", 24, 1, SSD1306_WHITE);
-        printCentered(ssid, 38, 1, SSD1306_WHITE, 18);
+        printCentered("Connecting Wi-Fi...", 22, 1, SSD1306_WHITE, 19);
+        printCentered(ssid, 36, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
@@ -111,24 +119,21 @@ public:
         display.print(F("[LOCKED]"));
 
         if (timeStr && strlen(timeStr) > 0) {
-            // Live 12-Hour Digital Clock Display (Size 2)
-            printCentered(timeStr, 16, 2, SSD1306_WHITE);
+            // Live 12-Hour Digital Clock Display (Size 2, 8 chars max: e.g. "12:45 PM")
+            printCentered(timeStr, 16, 2, SSD1306_WHITE, 10);
 
             // Date underneath clock
             if (dateStr && strlen(dateStr) > 0) {
-                printCentered(dateStr, 34, 1, SSD1306_WHITE);
+                printCentered(dateStr, 34, 1, SSD1306_WHITE, 18);
             }
         } else {
-            // Fallback static prompt
-            printCentered("[ TERMINAL LOCKED ]", 20, 1, SSD1306_WHITE);
-            printCentered("Waiting for Faculty", 34, 1, SSD1306_WHITE);
+            printCentered("TERMINAL LOCKED", 20, 1, SSD1306_WHITE, 18);
+            printCentered("Awaiting Faculty", 34, 1, SSD1306_WHITE, 18);
         }
 
-        // Bottom Strip: Room & Scan prompt
+        // Bottom Strip: Clear Prompt
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        char botBuf[24];
-        snprintf(botBuf, sizeof(botBuf), "%s: TAP FACULTY", room);
-        printCentered(botBuf, 50, 1, SSD1306_WHITE, 20);
+        printCentered("TAP FACULTY BADGE", 50, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
@@ -145,10 +150,10 @@ public:
         display.setTextSize(1);
         display.setCursor(4, 2);
 
-        // Clamp section code on top header to 13 chars
-        char secHeader[14];
-        strncpy(secHeader, sectionCode, 13);
-        secHeader[13] = '\0';
+        // Clamp section code on top header to 11 chars
+        char secHeader[13];
+        strncpy(secHeader, sectionCode, 11);
+        secHeader[11] = '\0';
         display.print(secHeader);
 
         // Network Status Flag
@@ -157,16 +162,16 @@ public:
 
         if (timeStr && strlen(timeStr) > 0) {
             // Live 12-Hour Clock
-            printCentered(timeStr, 16, 2, SSD1306_WHITE);
-            printCentered(">> READY TO SCAN <<", 34, 1, SSD1306_WHITE);
+            printCentered(timeStr, 16, 2, SSD1306_WHITE, 10);
+            printCentered("READY FOR INGRESS", 34, 1, SSD1306_WHITE, 18);
         } else {
-            printCentered(">> READY TO SCAN <<", 20, 1, SSD1306_WHITE);
-            printCentered("Present Student Card", 34, 1, SSD1306_WHITE);
+            printCentered("READY FOR INGRESS", 20, 1, SSD1306_WHITE, 18);
+            printCentered("Present Student Card", 34, 1, SSD1306_WHITE, 20);
         }
 
         // Bottom Keypad Cue
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        printCentered("PRESS # FOR OTP PIN", 50, 1, SSD1306_WHITE);
+        printCentered("PRESS # FOR PIN OTP", 50, 1, SSD1306_WHITE, 19);
 
         display.display();
     }
@@ -177,28 +182,21 @@ public:
     void showPacingCooldown(float remainingSecs) {
         display.clearDisplay();
 
-        // Top Banner
-        display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(4, 2);
-        display.print(F("PACING INTERLOCK"));
-        display.setCursor(92, 2);
-        display.print(F("[HOLD]"));
+        drawHeader("PACING COOLDOWN");
 
-        printCentered("ANTI-PROXY COOLDOWN", 16, 1, SSD1306_WHITE);
+        printCentered("ANTI-PROXY HOLD", 16, 1, SSD1306_WHITE, 18);
 
         // Cooldown Timer in Size 2
-        char timerBuf[16];
+        char timerBuf[12];
         snprintf(timerBuf, sizeof(timerBuf), "%.1fs", remainingSecs);
-        printCentered(timerBuf, 28, 2, SSD1306_WHITE);
+        printCentered(timerBuf, 28, 2, SSD1306_WHITE, 8);
 
-        // Smooth Progress Bar
-        int barWidth = (int)((remainingSecs / 3.0f) * 108.0f);
-        if (barWidth > 108) barWidth = 108;
+        // Centered Progress Bar
+        int barWidth = (int)((remainingSecs / 3.0f) * 96.0f);
+        if (barWidth > 96) barWidth = 96;
         if (barWidth < 0) barWidth = 0;
-        display.drawRect(8, 48, 112, 8, SSD1306_WHITE);
-        display.fillRect(10, 50, barWidth, 4, SSD1306_WHITE);
+        display.drawRect(14, 48, 100, 8, SSD1306_WHITE);
+        display.fillRect(16, 50, barWidth, 4, SSD1306_WHITE);
 
         display.display();
     }
@@ -209,34 +207,27 @@ public:
     void showAccessGranted(const char* name, const char* status, const char* studentId) {
         display.clearDisplay();
 
-        // Inverted Top Bar
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-
         if (strcmp(status, "LATE") == 0) {
-            display.setCursor(6, 3);
-            display.print(F(">> CHECK-IN (LATE) <<"));
+            drawHeader("CHECK-IN (LATE)");
         } else {
-            display.setCursor(4, 3);
-            display.print(F(">> ACCESS GRANTED <<"));
+            drawHeader("ACCESS GRANTED");
         }
 
-        // Student Info (Truncate to 20 chars)
+        // Student Info
         char cleanName[22];
-        strncpy(cleanName, name, 20);
-        cleanName[20] = '\0';
-        printCentered(cleanName, 18, 1, SSD1306_WHITE, 20);
+        strncpy(cleanName, name, 18);
+        cleanName[18] = '\0';
+        printCentered(cleanName, 18, 1, SSD1306_WHITE, 18);
 
         char idBuf[22];
         snprintf(idBuf, sizeof(idBuf), "ID: %s", studentId);
-        printCentered(idBuf, 32, 1, SSD1306_WHITE, 20);
+        printCentered(idBuf, 31, 1, SSD1306_WHITE, 18);
 
         // Status Badge Strip
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
         char statBuf[22];
         snprintf(statBuf, sizeof(statBuf), "STATUS: %s", status);
-        printCentered(statBuf, 50, 1, SSD1306_WHITE, 20);
+        printCentered(statBuf, 50, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
@@ -248,53 +239,101 @@ public:
     void showAccessDenied(const char* line1, const char* line2 = nullptr, const char* line3 = nullptr) {
         display.clearDisplay();
 
-        // Inverted Top Bar
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(14, 3);
-        display.print(F("[ ACCESS DENIED ]"));
+        drawHeader("ACCESS DENIED");
 
-        // Center Reason Lines (each strictly capped at 20 chars)
-        printCentered(line1, 20, 1, SSD1306_WHITE, 20);
+        // Center Reason Lines (each strictly capped at 18 chars)
+        printCentered(line1, 18, 1, SSD1306_WHITE, 18);
 
         if (line2 && strlen(line2) > 0) {
-            printCentered(line2, 33, 1, SSD1306_WHITE, 20);
+            printCentered(line2, 30, 1, SSD1306_WHITE, 18);
         }
 
         // Bottom Divider & Guidance
-        display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
         if (line3 && strlen(line3) > 0) {
-            printCentered(line3, 50, 1, SSD1306_WHITE, 20);
+            printCentered(line3, 49, 1, SSD1306_WHITE, 18);
         } else {
-            printCentered("INGRESS REJECTED", 50, 1, SSD1306_WHITE, 20);
+            printCentered("INGRESS REJECTED", 49, 1, SSD1306_WHITE, 18);
         }
 
         display.display();
     }
 
     /**
-     * Live RFID Card Intercept / Registration Screen
-     * Shows card hex UID and status on OLED
+     * Live Admin RFID Enrollment Scanning Screen
+     * Clearly displays that admin is adding a new student or faculty!
      */
-    void showCardScannedScreen(const char* cardUid, bool isRegistered) {
+    void showEnrollmentScanningScreen(const char* targetRole = "STUDENT", const char* targetName = nullptr) {
         display.clearDisplay();
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(6, 3);
-        display.print(isRegistered ? F("[ TAG RECOGNIZED ]") : F("[ RFID INTERCEPT ]"));
+
+        drawHeader("ADMIN ENROLLMENT");
+
+        char roleBuf[22];
+        if (targetRole && (strcmp(targetRole, "FACULTY") == 0 || strcmp(targetRole, "ADMIN") == 0)) {
+            snprintf(roleBuf, sizeof(roleBuf), "ROLE: NEW FACULTY");
+        } else {
+            snprintf(roleBuf, sizeof(roleBuf), "ROLE: NEW STUDENT");
+        }
+
+        if (targetName && strlen(targetName) > 0) {
+            printCentered(roleBuf, 15, 1, SSD1306_WHITE, 18);
+
+            char nameBuf[22];
+            snprintf(nameBuf, sizeof(nameBuf), "%.18s", targetName);
+            printCentered(nameBuf, 25, 1, SSD1306_WHITE, 18);
+
+            printCentered("SCANNING LIVE RFID", 35, 1, SSD1306_WHITE, 18);
+        } else {
+            printCentered(roleBuf, 16, 1, SSD1306_WHITE, 18);
+            printCentered("SCANNING LIVE RFID", 29, 1, SSD1306_WHITE, 18);
+        }
+
+        // Bottom Strip
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered(">> TAP NEW BADGE <<", 50, 1, SSD1306_WHITE, 19);
+
+        display.display();
+    }
+
+    /**
+     * Live Admin RFID Enrollment Tag Captured Screen
+     */
+    void showEnrollmentCapturedScreen(const char* cardUid, const char* targetRole = "STUDENT", bool isRegistered = false, const char* cardHolder = nullptr) {
+        display.clearDisplay();
+
+        drawHeader(isRegistered ? "[ TAG RE-MAPPED ]" : "[ BADGE CAPTURED ]");
 
         char uidBuf[22];
         snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
-        printCentered(uidBuf, 22, 1, SSD1306_WHITE, 20);
+        printCentered(uidBuf, 16, 1, SSD1306_WHITE, 18);
+
+        if (isRegistered && cardHolder && strlen(cardHolder) > 0) {
+            char holdBuf[22];
+            snprintf(holdBuf, sizeof(holdBuf), "%.16s", cardHolder);
+            printCentered(holdBuf, 28, 1, SSD1306_WHITE, 18);
+        } else {
+            printCentered("Live Tag Captured", 28, 1, SSD1306_WHITE, 18);
+        }
 
         display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        if (isRegistered) {
-            printCentered("Assigned Credential", 49, 1, SSD1306_WHITE, 20);
-        } else {
-            printCentered("Ready for Register", 49, 1, SSD1306_WHITE, 20);
-        }
+        printCentered("Confirm in Admin UI", 49, 1, SSD1306_WHITE, 19);
+
+        display.display();
+    }
+
+    /**
+     * Live RFID Card Intercept / Registration Screen (Generic)
+     */
+    void showCardScannedScreen(const char* cardUid, bool isRegistered) {
+        display.clearDisplay();
+        drawHeader(isRegistered ? "[ TAG RECOGNIZED ]" : "[ RFID INTERCEPT ]");
+
+        char uidBuf[22];
+        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
+        printCentered(uidBuf, 20, 1, SSD1306_WHITE, 18);
+
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        printCentered(isRegistered ? "Assigned Credential" : "Ready for Register", 49, 1, SSD1306_WHITE, 19);
         display.display();
     }
 
@@ -303,68 +342,60 @@ public:
      */
     void showSessionStateScreen(bool opened, const char* sectionCode, const char* facultyName = nullptr) {
         display.clearDisplay();
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(6, 3);
-        display.print(opened ? F("[ SESSION OPENED ]") : F("[ SESSION CLOSED ]"));
+        drawHeader(opened ? "SESSION OPENED" : "SESSION CLOSED");
 
         char secBuf[22];
         snprintf(secBuf, sizeof(secBuf), "%s", sectionCode);
-        printCentered(secBuf, 20, 1, SSD1306_WHITE, 20);
+        printCentered(secBuf, 18, 1, SSD1306_WHITE, 18);
 
         if (opened) {
             if (facultyName && strlen(facultyName) > 0) {
                 char facBuf[22];
-                snprintf(facBuf, sizeof(facBuf), "Prof. %s", facultyName);
-                printCentered(facBuf, 33, 1, SSD1306_WHITE, 20);
+                snprintf(facBuf, sizeof(facBuf), "Prof. %.12s", facultyName);
+                printCentered(facBuf, 30, 1, SSD1306_WHITE, 18);
             } else {
-                printCentered("Manifest Active", 33, 1, SSD1306_WHITE, 20);
+                printCentered("Manifest Active", 30, 1, SSD1306_WHITE, 18);
             }
         } else {
-            printCentered("Roster Finalized", 33, 1, SSD1306_WHITE, 20);
+            printCentered("Roster Finalized", 30, 1, SSD1306_WHITE, 18);
         }
 
-        display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        printCentered(opened ? "Ready For Ingress" : "Reports Dispatched", 50, 1, SSD1306_WHITE, 20);
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        printCentered(opened ? "Ready For Ingress" : "Terminal Locked", 49, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
 
     /**
-     * 4x4 Keypad PIN Entry Screen
+     * 4x4 Keypad PIN Entry Screen: Fixes size 2 overflow with 6 aligned digit boxes!
      */
     void showKeypadOtpScreen(const char* buffer, int length, unsigned long remainingSecs) {
         display.clearDisplay();
 
-        // Header
-        display.fillRect(0, 0, SCREEN_WIDTH, 12, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(6, 2);
-        display.print(F("KEYPAD OTP INGRESS"));
+        drawHeader("KEYPAD OTP INGRESS");
 
-        printCentered("Enter 6-Digit PIN:", 16, 1, SSD1306_WHITE);
+        printCentered("Enter 6-Digit PIN:", 15, 1, SSD1306_WHITE, 18);
 
-        // Render formatted PIN slots [ 1 2 3 _ _ _ ] centered
-        char pinDisplay[20] = {0};
-        int pos = 0;
+        // Draw 6 clean digit frames centered on 128px screen:
+        // 6 boxes of width 14px, 4px gap = 6*14 + 5*4 = 104px. Start X = (128 - 104) / 2 = 12px.
         for (int i = 0; i < 6; i++) {
+            int bx = 12 + (i * 18);
+            display.drawRect(bx, 26, 14, 15, SSD1306_WHITE);
+            display.setCursor(bx + 4, 30);
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
             if (i < length) {
-                pinDisplay[pos++] = buffer[i];
+                display.print(buffer[i]);
             } else {
-                pinDisplay[pos++] = '_';
+                display.print('-');
             }
-            if (i < 5) pinDisplay[pos++] = ' ';
         }
-        pinDisplay[pos] = '\0';
-        printCentered(pinDisplay, 28, 2, SSD1306_WHITE);
 
         // Instructions Footer
-        display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
         char footBuf[22];
-        snprintf(footBuf, sizeof(footBuf), "#:Submit *:Clr (%lus)", remainingSecs);
-        printCentered(footBuf, 50, 1, SSD1306_WHITE, 20);
+        snprintf(footBuf, sizeof(footBuf), "#:OK *:Clr (%lus)", remainingSecs);
+        printCentered(footBuf, 49, 1, SSD1306_WHITE, 18);
 
         display.display();
     }
@@ -374,16 +405,11 @@ public:
      */
     void showProcessing(const char* message) {
         display.clearDisplay();
-        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
 
-        display.fillRect(0, 0, SCREEN_WIDTH, 14, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.setTextSize(1);
-        display.setCursor(14, 3);
-        display.print(F("AUTHENTICATING..."));
+        drawHeader("AUTHENTICATING");
 
-        printCentered(message, 30, 1, SSD1306_WHITE, 20);
-        printCentered("Please Wait", 44, 1, SSD1306_WHITE, 20);
+        printCentered(message, 26, 1, SSD1306_WHITE, 18);
+        printCentered("Please Wait...", 40, 1, SSD1306_WHITE, 18);
 
         display.display();
     }

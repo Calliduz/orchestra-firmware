@@ -21,6 +21,8 @@ struct TerminalApiResponse {
     String status;
     String sectionCode;
     String facultyName;
+    bool isRegistered;
+    String cardHolder;
 };
 
 class OrchestraNetworkClient {
@@ -175,7 +177,7 @@ public:
         }
     }
 
-    bool syncTerminalStatus(bool &isLocked, String &sectionCode) {
+    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole) {
         if (!isConnected()) return false;
 
         HTTPClient http;
@@ -194,6 +196,8 @@ public:
             if (!err) {
                 isLocked = doc["isLocked"] | true;
                 sectionCode = doc["session"]["sectionCode"] | DEFAULT_SECTION;
+                enrollmentActive = doc["enrollment"]["active"] | false;
+                targetRole = doc["enrollment"]["targetRole"] | "STUDENT";
                 success = true;
             }
         }
@@ -239,6 +243,8 @@ public:
                 outResponse.status = resDoc["data"]["status"] | "";
                 outResponse.sectionCode = resDoc["data"]["sectionCode"] | DEFAULT_SECTION;
                 outResponse.facultyName = resDoc["data"]["facultyName"] | "";
+                outResponse.isRegistered = resDoc["data"]["isRegistered"] | false;
+                outResponse.cardHolder = resDoc["data"]["cardHolderName"] | "";
             }
         } else {
             outResponse.code = "ERR_HTTP_FAIL";
