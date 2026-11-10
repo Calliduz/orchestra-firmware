@@ -17,6 +17,16 @@ struct FacultyCacheRecord {
 };
 
 /**
+ * Structure representing an enrolled student cached in terminal memory
+ * Allows instant offline student name/ID resolution so students get full feedback!
+ */
+struct StudentCacheRecord {
+    String rfidUid;
+    String studentId;
+    String name;
+};
+
+/**
  * Structure representing an offline attendance log recorded during Wi-Fi outage
  */
 struct OfflineAttendanceRecord {
@@ -30,6 +40,7 @@ private:
     Preferences prefProf;
     Preferences prefLogs;
     std::vector<FacultyCacheRecord> facultyCache;
+    std::vector<StudentCacheRecord> studentCache;
     std::vector<OfflineAttendanceRecord> pendingLogs;
 
     String offlineSessionAction = "CONTINUE"; // "START", "CLOSE", or "CONTINUE"
@@ -45,6 +56,23 @@ private:
         addOrUpdateFacultyInMemory("99AA88BB", "System Administrator", "ADMIN");
     }
 
+    void seedDefaultStudents() {
+        // Pre-seed known section students for instant offline name resolution
+        addOrUpdateStudentInMemory("91C6F380", "2023-0001-CCS", "Agbada, Justine");
+        addOrUpdateStudentInMemory("8173F980", "2023-0002-CCS", "Altichie, Rjhay");
+        addOrUpdateStudentInMemory("119255B1", "2023-0003-CCS", "Cabunoc, Josh");
+        addOrUpdateStudentInMemory("41860681", "2023-0004-CCS", "Dalupang, Juzten");
+        addOrUpdateStudentInMemory("50E5F6A7", "2023-0005-CCS", "Macadat Jr, K.");
+        addOrUpdateStudentInMemory("60F6A788", "2023-0006-CCS", "Malate, Denmark");
+        addOrUpdateStudentInMemory("70A7B8C9", "2023-0007-CCS", "Santos, Maria");
+        addOrUpdateStudentInMemory("80B8C9D0", "2023-0008-CCS", "Reyes, Juan");
+        addOrUpdateStudentInMemory("90C9D0E1", "2023-0009-CCS", "Dela Cruz, Bea");
+        addOrUpdateStudentInMemory("01D0E1F2", "2023-0010-CCS", "Tan, Lance");
+        addOrUpdateStudentInMemory("12E1F2A3", "2023-0011-CCS", "Garcia, Sofia");
+        addOrUpdateStudentInMemory("23F2A3B4", "2023-0012-CCS", "Bautista, Paolo");
+        addOrUpdateStudentInMemory("D1E219B1", "2023-0013-CCS", "Registered Student");
+    }
+
     void addOrUpdateFacultyInMemory(const String &uid, const String &name, const String &role) {
         String cleanUid = normalizeUid(uid);
         for (auto &f : facultyCache) {
@@ -55,6 +83,18 @@ private:
             }
         }
         facultyCache.push_back({cleanUid, name, role});
+    }
+
+    void addOrUpdateStudentInMemory(const String &uid, const String &studentId, const String &name) {
+        String cleanUid = normalizeUid(uid);
+        for (auto &s : studentCache) {
+            if (s.rfidUid.equalsIgnoreCase(cleanUid)) {
+                s.studentId = studentId;
+                s.name = name;
+                return;
+            }
+        }
+        studentCache.push_back({cleanUid, studentId, name});
     }
 
 public:
@@ -74,11 +114,24 @@ public:
         prefLogs.begin("orch_logs", false);
 
         seedDefaultFaculty();
+        seedDefaultStudents();
         loadFacultyFromNvs();
         loadLogsFromNvs();
 
-        Serial.printf(F("[OFFLINE STORAGE] Initialized. %u faculty cached, %u pending offline logs in NVS.\n"),
-                      facultyCache.size(), pendingLogs.size());
+        Serial.printf(F("[OFFLINE STORAGE] Initialized. %u faculty, %u students cached, %u pending logs in NVS.\n"),
+                      facultyCache.size(), studentCache.size(), pendingLogs.size());
+    }
+
+    bool findStudent(const String &cardUid, String &outName, String &outStudentId) {
+        String clean = normalizeUid(cardUid);
+        for (const auto &s : studentCache) {
+            if (s.rfidUid.equalsIgnoreCase(clean)) {
+                outName = s.name;
+                outStudentId = s.studentId;
+                return true;
+            }
+        }
+        return false;
     }
 
     // =========================================================================
@@ -174,6 +227,22 @@ public:
         }
     }
 
+    void appendLogToNvs(const OfflineAttendanceRecord &rec, int index) {
+        char kU[16], kT[16], kM[16];
+        snprintf(kU, sizeof(kU), "lu_%d", index);
+        snprintf(kT, sizeof(kT), "lt_%d", index);
+        snprintf(kM, sizeof(kM), "lm_%d", index);
+
+        prefLogs.putString(kU, rec.rfidUid);
+        prefLogs.putString(kT, rec.timestamp);
+        prefLogs.putString(kM, rec.authMethod);
+        prefLogs.putInt("log_count", index + 1);
+        prefLogs.putString("act", offlineSessionAction);
+        if (offlineFacultyUid.length() > 0) {
+            prefLogs.putString("fac_uid", offlineFacultyUid);
+        }
+    }
+
     void saveLogsToNvs() {
         prefLogs.clear();
         int count = (int)pendingLogs.size();
@@ -207,7 +276,7 @@ public:
     }
 
     /**
-     * Append offline attendance log
+     * Append offline attendance log (Fast 2ms append write)
      */
     bool addRecord(const String &cardUid, const String &timestamp = "", const String &authMethod = "RFID_TAP") {
         if (pendingLogs.size() >= 100) {
@@ -240,8 +309,9 @@ public:
         strncpy(rec.authMethod, authMethod.c_str(), sizeof(rec.authMethod) - 1);
         rec.authMethod[sizeof(rec.authMethod) - 1] = '\0';
 
+        int index = (int)pendingLogs.size();
         pendingLogs.push_back(rec);
-        saveLogsToNvs();
+        appendLogToNvs(rec, index);
 
         Serial.printf(F("[OFFLINE STORAGE] Recorded tap for 0x%s at %s. Total pending: %u\n"),
                       rec.rfidUid, rec.timestamp, pendingLogs.size());

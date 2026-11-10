@@ -508,7 +508,18 @@ void handleOfflineCardTap(const String &cardUid) {
     bool saved = offlineStorage.addRecord(cardUid);
     if (saved) {
         audioLed.cueAccessGranted();
-        displayMgr.showOfflineAttendanceSaved(cardUid.c_str(), offlineStorage.getPendingCount());
+
+        String sName, sId;
+        if (offlineStorage.findStudent(cardUid, sName, sId)) {
+            // Recognized student: Show actual name, student ID, and offline ingress badge!
+            char statBuf[24];
+            snprintf(statBuf, sizeof(statBuf), "OFFLINE (#%d)", offlineStorage.getPendingCount());
+            displayMgr.showAccessGranted(sName.c_str(), statBuf, sId.c_str());
+        } else {
+            // Un-cached UID: display raw UID with pending index
+            displayMgr.showOfflineAttendanceSaved(cardUid.c_str(), offlineStorage.getPendingCount());
+        }
+
         lastStudentScanTime = millis();
         stateAfterFeedback = STATE_PACING_COOLDOWN; // 3.0s anti-proxy interlock
         changeState(STATE_FEEDBACK_DISPLAY);
@@ -527,6 +538,9 @@ void processRfidCard() {
     if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
         return;
     }
+
+    // Instant physical feedback (< 1ms) confirming antenna coupling
+    audioLed.playKeypadClick();
 
     String cardUid = getCardUidHex(&(mfrc522.uid));
     mfrc522.PICC_HaltA();
