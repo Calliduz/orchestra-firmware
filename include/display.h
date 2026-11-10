@@ -371,6 +371,69 @@ public:
     }
 
     /**
+     * Offline Session State Change Screen (Opened / Closed locally while offline)
+     */
+    void showOfflineSessionState(bool opened, const char* facultyName = nullptr) {
+        display.clearDisplay();
+        drawHeader(opened ? "[ OFFLINE OPEN ]" : "[ OFFLINE LOCK ]");
+
+        if (facultyName && strlen(facultyName) > 0) {
+            char facBuf[22];
+            snprintf(facBuf, sizeof(facBuf), "Prof. %.12s", facultyName);
+            printCentered(facBuf, 18, 1, SSD1306_WHITE, 18);
+        } else {
+            printCentered("FACULTY OVERRIDE", 18, 1, SSD1306_WHITE, 18);
+        }
+
+        printCentered(opened ? "LOCAL SESSION OPEN" : "SESSION CLOSED", 30, 1, SSD1306_WHITE, 18);
+
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        printCentered(opened ? "Ready For Ingress" : "Queued For Sync", 49, 1, SSD1306_WHITE, 18);
+
+        display.display();
+    }
+
+    /**
+     * Offline Attendance Buffered Screen (Stored in NVS Queue)
+     */
+    void showOfflineAttendanceSaved(const char* cardUid, int queuedCount) {
+        display.clearDisplay();
+        drawHeader("[ OFFLINE SAVED ]");
+
+        char uidBuf[22];
+        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
+        printCentered(uidBuf, 18, 1, SSD1306_WHITE, 18);
+
+        printCentered("Buffered In NVS", 30, 1, SSD1306_WHITE, 18);
+
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        char qBuf[22];
+        snprintf(qBuf, sizeof(qBuf), "Queue #%d (Pending)", queuedCount);
+        printCentered(qBuf, 49, 1, SSD1306_WHITE, 19);
+
+        display.display();
+    }
+
+    /**
+     * Offline Sync Complete Screen (Triggered when Wi-Fi reconnects)
+     */
+    void showOfflineSyncComplete(int syncedCount) {
+        display.clearDisplay();
+        drawHeader("[ SYNC COMPLETE ]");
+
+        printCentered("Wi-Fi Reconnected", 18, 1, SSD1306_WHITE, 18);
+
+        char countBuf[22];
+        snprintf(countBuf, sizeof(countBuf), "Uploaded: %d Taps", syncedCount);
+        printCentered(countBuf, 30, 1, SSD1306_WHITE, 18);
+
+        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        printCentered("Cloud Synced OK", 49, 1, SSD1306_WHITE, 18);
+
+        display.display();
+    }
+
+    /**
      * 4x4 Keypad PIN Entry Screen: Fixes size 2 overflow with 6 aligned digit boxes!
      */
     void showKeypadOtpScreen(const char* buffer, int length, unsigned long remainingSecs) {

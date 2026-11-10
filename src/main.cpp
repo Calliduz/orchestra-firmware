@@ -30,11 +30,13 @@
 #include "config.h"
 #include "audio_led.h"
 #include "display.h"
+#include "offline_storage.h"
 #include "network_client.h"
 
 // Instantiate Global Singletons
 AudioLedManager audioLed;
 DisplayManager displayMgr;
+OfflineStorageManager offlineStorage;
 OrchestraNetworkClient netClient;
 
 // MFRC522 RFID Hardware Reader Instance
@@ -126,6 +128,9 @@ void setup() {
     Serial.printf(F("📍 Classroom Location:  %s\n"), ROOM_NUMBER);
     Serial.printf(F("🛡️ Security API Token:  %s\n"), HARDWARE_API_KEY);
     Serial.println(F("======================================================"));
+
+    // 0. Initialize Offline Storage & Local Professor Cache from NVS
+    offlineStorage.begin();
 
     // 1. Initialize Auditory & Visual Feedback Cues
     audioLed.begin();
@@ -278,6 +283,35 @@ void loop() {
         }
     }
 
+    // 3b. Automatic Flush / Sync of Offline Buffered Attendance Records
+    static unsigned long lastOfflineSyncAttempt = 0;
+    if (netClient.isConnected() && offlineStorage.getPendingCount() > 0 &&
+        (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN)) {
+        if (now - lastOfflineSyncAttempt >= 4000) {
+            lastOfflineSyncAttempt = now;
+            int countToSync = offlineStorage.getPendingCount();
+            Serial.printf(F("[OFFLINE SYNC TRIGGER] Network link active! Uploading %d buffered taps...\n"), countToSync);
+            displayMgr.showProcessing("Syncing Offline Logs...");
+
+            int syncedCount = 0;
+            bool success = netClient.postOfflineSync(
+                TERMINAL_ID,
+                offlineStorage.getOfflineSessionAction(),
+                offlineStorage.getOfflineFacultyUid(),
+                offlineStorage.getRecords(),
+                syncedCount
+            );
+
+            if (success) {
+                audioLed.cueAccessGranted();
+                displayMgr.showOfflineSyncComplete(syncedCount);
+                offlineStorage.clearRecords();
+                stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
+                changeState(STATE_FEEDBACK_DISPLAY);
+            }
+        }
+    }
+
     // 4. State Machine Dispatcher
     switch (currentState) {
         case STATE_LOCKED: {
@@ -419,6 +453,74 @@ void handlePacingInterlock() {
 }
 
 // =========================================================================
+// OFFLINE CARD TAP & LOCAL SESSION TRUST HANDLER
+// =========================================================================
+void handleOfflineCardTap(const String &cardUid) {
+    Serial.printf(F("[OFFLINE TAP] Evaluating card 0x%s against local cache...\n"), cardUid.c_str());
+
+    String profName, profRole;
+    bool isProf = offlineStorage.isAuthorizedProfessor(cardUid, profName, profRole);
+
+    if (isProf) {
+        // Faculty Master Badge tapped offline!
+        if (isTerminalLocked) {
+            // UNLOCK & OPEN OFFLINE SESSION
+            isTerminalLocked = false;
+            offlineStorage.markOfflineSessionStarted(cardUid);
+            audioLed.cueSessionStateChanged(true);
+            displayMgr.showOfflineSessionState(true, profName.c_str());
+            stateAfterFeedback = STATE_IDLE_SCAN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        } else {
+            // LOCK & CLOSE OFFLINE SESSION
+            isTerminalLocked = true;
+            offlineStorage.markOfflineSessionClosed(cardUid);
+            audioLed.cueSessionStateChanged(false);
+            displayMgr.showOfflineSessionState(false, profName.c_str());
+            stateAfterFeedback = STATE_LOCKED;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        }
+        return;
+    }
+
+    // Not a faculty master badge
+    if (isTerminalLocked) {
+        // Terminal locked: Student badge presented
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("TERMINAL LOCKED", "Scan Prof Badge", "Offline Mode");
+        stateAfterFeedback = STATE_LOCKED;
+        changeState(STATE_FEEDBACK_DISPLAY);
+        return;
+    }
+
+    // Terminal is OPEN: Student ingress offline!
+    if (offlineStorage.isAlreadyLogged(cardUid)) {
+        // Local anti-passback defense
+        Serial.printf(F("[ANTI-PASSBACK OFFLINE] 0x%s already in offline buffer!\n"), cardUid.c_str());
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Logged", "In Offline Cache");
+        stateAfterFeedback = STATE_IDLE_SCAN;
+        changeState(STATE_FEEDBACK_DISPLAY);
+        return;
+    }
+
+    // Append to offline queue (NVS backed)
+    bool saved = offlineStorage.addRecord(cardUid);
+    if (saved) {
+        audioLed.cueAccessGranted();
+        displayMgr.showOfflineAttendanceSaved(cardUid.c_str(), offlineStorage.getPendingCount());
+        lastStudentScanTime = millis();
+        stateAfterFeedback = STATE_PACING_COOLDOWN; // 3.0s anti-proxy interlock
+        changeState(STATE_FEEDBACK_DISPLAY);
+    } else {
+        audioLed.cueAccessDenied();
+        displayMgr.showAccessDenied("QUEUE FULL", "Offline Storage", "Reconnect Wi-Fi");
+        stateAfterFeedback = STATE_IDLE_SCAN;
+        changeState(STATE_FEEDBACK_DISPLAY);
+    }
+}
+
+// =========================================================================
 // SPI MFRC522 RFID CARD PROCESSING
 // =========================================================================
 void processRfidCard() {
@@ -434,8 +536,22 @@ void processRfidCard() {
     Serial.printf(F("[RFID EVENT] Interrogated ISO 14443A Tag: 0x%s\n"), cardUid.c_str());
     displayMgr.showProcessing("Validating RFID...");
 
+    // If offline / Wi-Fi disconnected, directly invoke offline trust handler
+    if (!netClient.isConnected()) {
+        Serial.println(F("[OFFLINE] No Wi-Fi link. Delegating to local offline storage..."));
+        handleOfflineCardTap(cardUid);
+        return;
+    }
+
     TerminalApiResponse response;
     bool reqSuccess = netClient.postRfidTap(cardUid, response);
+
+    // If request failed due to sudden network loss, fallback to offline storage
+    if (!reqSuccess || response.code == "OFFLINE" || response.code == "ERR_HTTP_FAIL") {
+        Serial.println(F("[OFFLINE FALLBACK] Server unreachable during tap. Saving locally..."));
+        handleOfflineCardTap(cardUid);
+        return;
+    }
 
     Serial.printf(F("[BACKEND RESPONSE] HTTP %d | Code: %s | Message: %s\n"),
                   response.httpCode, response.code.c_str(), response.message.c_str());

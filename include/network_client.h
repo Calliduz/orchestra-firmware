@@ -11,6 +11,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "config.h"
+#include "offline_storage.h"
 
 struct TerminalApiResponse {
     int httpCode;
@@ -199,6 +200,24 @@ public:
                 enrollmentActive = doc["enrollment"]["active"] | false;
                 targetRole = doc["enrollment"]["targetRole"] | "STUDENT";
                 targetName = doc["enrollment"]["targetName"] | "";
+
+                // Parse authorized faculty instructor list and update local offline cache
+                if (doc["authorizedFaculty"].is<JsonArray>()) {
+                    JsonArray facArr = doc["authorizedFaculty"].as<JsonArray>();
+                    std::vector<FacultyCacheRecord> facList;
+                    for (JsonObject item : facArr) {
+                        String u = item["rfidUid"] | "";
+                        String n = item["name"] | "";
+                        String r = item["role"] | "FACULTY";
+                        if (u.length() > 0) {
+                            facList.push_back({u, n, r});
+                        }
+                    }
+                    if (!facList.empty()) {
+                        offlineStorage.updateFacultyList(facList);
+                    }
+                }
+
                 success = true;
             }
         }
@@ -302,6 +321,57 @@ public:
 
         http.end();
         return (httpCode == 200 || httpCode == 201);
+    }
+
+    bool postOfflineSync(const String &termId, const String &sessionAction, const String &facultyUid, const std::vector<OfflineAttendanceRecord> &records, int &outSyncedCount) {
+        if (!isConnected()) return false;
+
+        HTTPClient http;
+        String url = String(BACKEND_BASE_URL) + "/hardware/offline-sync";
+        http.begin(url);
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("x-api-key", HARDWARE_API_KEY);
+        http.setTimeout(12000);
+
+        JsonDocument reqDoc;
+        reqDoc["terminalId"] = termId;
+        reqDoc["sessionAction"] = sessionAction;
+        if (facultyUid.length() > 0) {
+            reqDoc["facultyUid"] = facultyUid;
+        }
+
+        JsonArray recArr = reqDoc["records"].to<JsonArray>();
+        for (const auto &rec : records) {
+            JsonObject item = recArr.add<JsonObject>();
+            item["rfidUid"] = rec.rfidUid;
+            item["timestamp"] = rec.timestamp;
+            item["authMethod"] = rec.authMethod;
+        }
+
+        String reqJson;
+        serializeJson(reqDoc, reqJson);
+
+        Serial.printf(F("[OFFLINE SYNC HTTP] Dispatching %u queued records to backend...\n"), records.size());
+        int httpCode = http.POST(reqJson);
+
+        bool success = false;
+        outSyncedCount = 0;
+
+        if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+            String resJson = http.getString();
+            JsonDocument resDoc;
+            DeserializationError err = deserializeJson(resDoc, resJson);
+            if (!err && (resDoc["success"] | false)) {
+                outSyncedCount = resDoc["syncedCount"] | (int)records.size();
+                success = true;
+                Serial.printf(F("[OFFLINE SYNC HTTP] Success! Synced %d records with server.\n"), outSyncedCount);
+            }
+        } else {
+            Serial.printf(F("[OFFLINE SYNC HTTP] Failed with code %d\n"), httpCode);
+        }
+
+        http.end();
+        return success;
     }
 };
 
