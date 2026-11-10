@@ -297,7 +297,7 @@ void loop() {
             lastOfflineSyncAttempt = now;
             int countToSync = offlineStorage.getPendingCount();
             Serial.printf(F("[OFFLINE SYNC TRIGGER] Network link active! Uploading %d buffered taps...\n"), countToSync);
-            displayMgr.showProcessing("Syncing Offline Logs...");
+            displayMgr.showProcessing("Syncing Logs...");
 
             int syncedCount = 0;
             bool success = netClient.postOfflineSync(
@@ -545,7 +545,7 @@ void handleOfflineCardTap(const String &cardUid) {
 
         // Recognized student: Show actual name, student ID, and offline ingress badge!
         char statBuf[24];
-        snprintf(statBuf, sizeof(statBuf), "OFFLINE (#%d)", offlineStorage.getPendingCount());
+        snprintf(statBuf, sizeof(statBuf), "OFFLINE #%d", offlineStorage.getPendingCount());
         displayMgr.showAccessGranted(sName.c_str(), statBuf, sId.c_str());
 
         lastStudentScanTime = millis();

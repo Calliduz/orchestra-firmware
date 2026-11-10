@@ -40,9 +40,9 @@ public:
         display.setTextSize(1);
         display.setTextWrap(false);
 
-        char buf[20];
-        strncpy(buf, title, 18);
-        buf[18] = '\0';
+        char buf[24];
+        strncpy(buf, title, 20);
+        buf[20] = '\0';
         int len = strlen(buf);
         int x = (SCREEN_WIDTH - (len * 6)) / 2;
         if (x < 2) x = 2;
@@ -53,13 +53,14 @@ public:
     /**
      * Helper to print pixel-perfect centered text on the 128x64 display.
      * Automatically truncates text beyond maxChars to strictly prevent unwanted line wraps.
+     * Supports up to 21 characters across the 128-pixel width in size 1 font.
      */
-    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 18) {
+    void printCentered(const char* text, int y, int size = 1, uint16_t color = SSD1306_WHITE, int maxChars = 20) {
         if (!text) return;
 
-        char buf[22];
-        int limit = (size == 2) ? 8 : maxChars;
-        if (limit > 18) limit = 18;
+        char buf[28];
+        int limit = (size == 2) ? 10 : maxChars;
+        if (limit > 21) limit = 21;
         strncpy(buf, text, limit);
         buf[limit] = '\0';
 
@@ -84,12 +85,12 @@ public:
 
         drawHeader("ORCHESTRA NODE");
 
-        printCentered("HARDWARE TRUST NODE", 20, 1, SSD1306_WHITE, 19);
-        printCentered("ESP32 Door Terminal", 32, 1, SSD1306_WHITE, 19);
+        printCentered("HARDWARE TRUST NODE", 20, 1, SSD1306_WHITE, 20);
+        printCentered("Door Terminal ESP32", 32, 1, SSD1306_WHITE, 20);
 
-        char verBuf[22];
+        char verBuf[24];
         snprintf(verBuf, sizeof(verBuf), "Firmware %s", version);
-        printCentered(verBuf, 46, 1, SSD1306_WHITE, 18);
+        printCentered(verBuf, 46, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -102,8 +103,8 @@ public:
 
         drawHeader("NETWORK UPLINK");
 
-        printCentered("Connecting Wi-Fi...", 22, 1, SSD1306_WHITE, 19);
-        printCentered(ssid, 36, 1, SSD1306_WHITE, 18);
+        printCentered("Connecting Wi-Fi...", 22, 1, SSD1306_WHITE, 20);
+        printCentered(ssid, 36, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -129,7 +130,7 @@ public:
 
             // Date underneath clock
             if (dateStr && strlen(dateStr) > 0) {
-                printCentered(dateStr, 34, 1, SSD1306_WHITE, 18);
+                printCentered(dateStr, 34, 1, SSD1306_WHITE, 20);
             }
         } else {
             printCentered("TERMINAL LOCKED", 20, 1, SSD1306_WHITE, 18);
@@ -138,7 +139,7 @@ public:
 
         // Bottom Strip: Clear Prompt
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        printCentered(wifiOk ? "TAP FACULTY BADGE" : "TAP PROF BADGE (OFF)", 50, 1, SSD1306_WHITE, 20);
+        printCentered("TAP FACULTY BADGE", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -157,26 +158,26 @@ public:
 
         // Clamp section code on top header to 11 chars
         char secHeader[13];
-        strncpy(secHeader, sectionCode, 11);
+        strncpy(secHeader, (sectionCode && strlen(sectionCode) > 0) ? sectionCode : "ACTIVE", 11);
         secHeader[11] = '\0';
         display.print(secHeader);
 
         // Network Status Flag
-        display.setCursor(96, 2);
-        display.print(wifiOk ? F("[NET]") : F("[!]"));
+        display.setCursor(wifiOk ? 92 : 72, 2);
+        display.print(wifiOk ? F("[NET]") : F("[OFFLINE]"));
 
         if (timeStr && strlen(timeStr) > 0) {
             // Live 12-Hour Clock
             printCentered(timeStr, 16, 2, SSD1306_WHITE, 10);
-            printCentered("READY FOR INGRESS", 34, 1, SSD1306_WHITE, 18);
+            printCentered("TAP STUDENT CARD", 34, 1, SSD1306_WHITE, 20);
         } else {
-            printCentered("READY FOR INGRESS", 20, 1, SSD1306_WHITE, 18);
-            printCentered("Present Student Card", 34, 1, SSD1306_WHITE, 20);
+            printCentered("READY FOR INGRESS", 18, 1, SSD1306_WHITE, 20);
+            printCentered("TAP STUDENT CARD", 32, 1, SSD1306_WHITE, 20);
         }
 
         // Bottom Keypad Cue
         display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        printCentered("PRESS # FOR PIN OTP", 50, 1, SSD1306_WHITE, 19);
+        printCentered("PRESS # FOR PIN OTP", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -189,7 +190,7 @@ public:
 
         drawHeader("PACING COOLDOWN");
 
-        printCentered("ANTI-PROXY HOLD", 16, 1, SSD1306_WHITE, 18);
+        printCentered("ANTI-PROXY HOLD", 16, 1, SSD1306_WHITE, 20);
 
         // Cooldown Timer in Size 2
         char timerBuf[12];
@@ -212,27 +213,35 @@ public:
     void showAccessGranted(const char* name, const char* status, const char* studentId) {
         display.clearDisplay();
 
-        if (strcmp(status, "LATE") == 0) {
+        if (status && strcmp(status, "LATE") == 0) {
             drawHeader("CHECK-IN (LATE)");
         } else {
             drawHeader("ACCESS GRANTED");
         }
 
         // Student Info
-        char cleanName[22];
-        strncpy(cleanName, name, 18);
-        cleanName[18] = '\0';
-        printCentered(cleanName, 18, 1, SSD1306_WHITE, 18);
+        char cleanName[24];
+        if (name && strlen(name) > 0) {
+            strncpy(cleanName, name, 20);
+            cleanName[20] = '\0';
+        } else {
+            strcpy(cleanName, "Student Verified");
+        }
+        printCentered(cleanName, 17, 1, SSD1306_WHITE, 20);
 
-        char idBuf[22];
-        snprintf(idBuf, sizeof(idBuf), "ID: %s", studentId);
-        printCentered(idBuf, 31, 1, SSD1306_WHITE, 18);
+        char idBuf[24];
+        if (studentId && strlen(studentId) > 0) {
+            snprintf(idBuf, sizeof(idBuf), "ID: %.16s", studentId);
+        } else {
+            strcpy(idBuf, "ID: Verified");
+        }
+        printCentered(idBuf, 30, 1, SSD1306_WHITE, 20);
 
         // Status Badge Strip
-        display.drawLine(0, 46, SCREEN_WIDTH, 46, SSD1306_WHITE);
-        char statBuf[22];
-        snprintf(statBuf, sizeof(statBuf), "STATUS: %s", status);
-        printCentered(statBuf, 50, 1, SSD1306_WHITE, 18);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        char statBuf[24];
+        snprintf(statBuf, sizeof(statBuf), "STATUS: %.12s", (status && strlen(status) > 0) ? status : "PRESENT");
+        printCentered(statBuf, 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -246,19 +255,19 @@ public:
 
         drawHeader("ACCESS DENIED");
 
-        // Center Reason Lines (each strictly capped at 18 chars)
-        printCentered(line1, 18, 1, SSD1306_WHITE, 18);
+        // Center Reason Lines (each safely capped at 20 chars)
+        if (line1) printCentered(line1, 17, 1, SSD1306_WHITE, 20);
 
         if (line2 && strlen(line2) > 0) {
-            printCentered(line2, 30, 1, SSD1306_WHITE, 18);
+            printCentered(line2, 29, 1, SSD1306_WHITE, 20);
         }
 
         // Bottom Divider & Guidance
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
         if (line3 && strlen(line3) > 0) {
-            printCentered(line3, 49, 1, SSD1306_WHITE, 18);
+            printCentered(line3, 50, 1, SSD1306_WHITE, 20);
         } else {
-            printCentered("INGRESS REJECTED", 49, 1, SSD1306_WHITE, 18);
+            printCentered("INGRESS REJECTED", 50, 1, SSD1306_WHITE, 20);
         }
 
         display.display();
@@ -273,7 +282,7 @@ public:
 
         drawHeader("ADMIN ENROLLMENT");
 
-        char roleBuf[22];
+        char roleBuf[24];
         if (targetRole && (strcmp(targetRole, "FACULTY") == 0 || strcmp(targetRole, "ADMIN") == 0)) {
             snprintf(roleBuf, sizeof(roleBuf), "ROLE: NEW FACULTY");
         } else {
@@ -281,21 +290,21 @@ public:
         }
 
         if (targetName && strlen(targetName) > 0) {
-            printCentered(roleBuf, 15, 1, SSD1306_WHITE, 18);
+            printCentered(roleBuf, 15, 1, SSD1306_WHITE, 20);
 
-            char nameBuf[22];
-            snprintf(nameBuf, sizeof(nameBuf), "%.18s", targetName);
-            printCentered(nameBuf, 25, 1, SSD1306_WHITE, 18);
+            char nameBuf[24];
+            snprintf(nameBuf, sizeof(nameBuf), "%.20s", targetName);
+            printCentered(nameBuf, 25, 1, SSD1306_WHITE, 20);
 
-            printCentered("SCANNING LIVE RFID", 35, 1, SSD1306_WHITE, 18);
+            printCentered("SCANNING LIVE RFID", 35, 1, SSD1306_WHITE, 20);
         } else {
-            printCentered(roleBuf, 16, 1, SSD1306_WHITE, 18);
-            printCentered("SCANNING LIVE RFID", 29, 1, SSD1306_WHITE, 18);
+            printCentered(roleBuf, 16, 1, SSD1306_WHITE, 20);
+            printCentered("SCANNING LIVE RFID", 29, 1, SSD1306_WHITE, 20);
         }
 
         // Bottom Strip
         display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
-        printCentered(">> TAP NEW BADGE <<", 50, 1, SSD1306_WHITE, 19);
+        printCentered(">> TAP NEW BADGE <<", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -308,20 +317,20 @@ public:
 
         drawHeader(isRegistered ? "[ TAG RE-MAPPED ]" : "[ BADGE CAPTURED ]");
 
-        char uidBuf[22];
+        char uidBuf[24];
         snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
-        printCentered(uidBuf, 16, 1, SSD1306_WHITE, 18);
+        printCentered(uidBuf, 16, 1, SSD1306_WHITE, 20);
 
         if (isRegistered && cardHolder && strlen(cardHolder) > 0) {
-            char holdBuf[22];
-            snprintf(holdBuf, sizeof(holdBuf), "%.16s", cardHolder);
-            printCentered(holdBuf, 28, 1, SSD1306_WHITE, 18);
+            char holdBuf[24];
+            snprintf(holdBuf, sizeof(holdBuf), "%.20s", cardHolder);
+            printCentered(holdBuf, 28, 1, SSD1306_WHITE, 20);
         } else {
-            printCentered("Live Tag Captured", 28, 1, SSD1306_WHITE, 18);
+            printCentered("Live Tag Captured", 28, 1, SSD1306_WHITE, 20);
         }
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        printCentered("Confirm in Admin UI", 49, 1, SSD1306_WHITE, 19);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered("Confirm in Admin UI", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -333,12 +342,12 @@ public:
         display.clearDisplay();
         drawHeader(isRegistered ? "[ TAG RECOGNIZED ]" : "[ RFID INTERCEPT ]");
 
-        char uidBuf[22];
+        char uidBuf[24];
         snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
-        printCentered(uidBuf, 20, 1, SSD1306_WHITE, 18);
+        printCentered(uidBuf, 20, 1, SSD1306_WHITE, 20);
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        printCentered(isRegistered ? "Assigned Credential" : "Ready for Register", 49, 1, SSD1306_WHITE, 19);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered(isRegistered ? "Registered Badge" : "Unassigned Badge", 50, 1, SSD1306_WHITE, 20);
         display.display();
     }
 
@@ -349,24 +358,24 @@ public:
         display.clearDisplay();
         drawHeader(opened ? "SESSION OPENED" : "SESSION CLOSED");
 
-        char secBuf[22];
-        snprintf(secBuf, sizeof(secBuf), "%s", sectionCode);
-        printCentered(secBuf, 18, 1, SSD1306_WHITE, 18);
+        char secBuf[24];
+        snprintf(secBuf, sizeof(secBuf), "%s", sectionCode ? sectionCode : "");
+        printCentered(secBuf, 17, 1, SSD1306_WHITE, 20);
 
         if (opened) {
             if (facultyName && strlen(facultyName) > 0) {
-                char facBuf[22];
-                snprintf(facBuf, sizeof(facBuf), "Prof. %.12s", facultyName);
-                printCentered(facBuf, 30, 1, SSD1306_WHITE, 18);
+                char facBuf[24];
+                snprintf(facBuf, sizeof(facBuf), "Prof. %.14s", facultyName);
+                printCentered(facBuf, 29, 1, SSD1306_WHITE, 20);
             } else {
-                printCentered("Manifest Active", 30, 1, SSD1306_WHITE, 18);
+                printCentered("Manifest Active", 29, 1, SSD1306_WHITE, 20);
             }
         } else {
-            printCentered("Roster Finalized", 30, 1, SSD1306_WHITE, 18);
+            printCentered("Roster Finalized", 29, 1, SSD1306_WHITE, 20);
         }
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        printCentered(opened ? "Ready For Ingress" : "Terminal Locked", 49, 1, SSD1306_WHITE, 18);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered(opened ? "Ready For Ingress" : "Terminal Locked", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -379,17 +388,17 @@ public:
         drawHeader(opened ? "[ OFFLINE OPEN ]" : "[ OFFLINE LOCK ]");
 
         if (facultyName && strlen(facultyName) > 0) {
-            char facBuf[22];
-            snprintf(facBuf, sizeof(facBuf), "Prof. %.12s", facultyName);
-            printCentered(facBuf, 18, 1, SSD1306_WHITE, 18);
+            char facBuf[24];
+            snprintf(facBuf, sizeof(facBuf), "Prof. %.14s", facultyName);
+            printCentered(facBuf, 17, 1, SSD1306_WHITE, 20);
         } else {
-            printCentered("FACULTY OVERRIDE", 18, 1, SSD1306_WHITE, 18);
+            printCentered("FACULTY OVERRIDE", 17, 1, SSD1306_WHITE, 20);
         }
 
-        printCentered(opened ? "LOCAL SESSION OPEN" : "SESSION CLOSED", 30, 1, SSD1306_WHITE, 18);
+        printCentered(opened ? "LOCAL SESSION OPEN" : "SESSION CLOSED", 29, 1, SSD1306_WHITE, 20);
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        printCentered(opened ? "Ready For Ingress" : "Queued For Sync", 49, 1, SSD1306_WHITE, 18);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered(opened ? "Ready For Ingress" : "Queued For Sync", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -401,16 +410,16 @@ public:
         display.clearDisplay();
         drawHeader("[ OFFLINE SAVED ]");
 
-        char uidBuf[22];
+        char uidBuf[24];
         snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
-        printCentered(uidBuf, 18, 1, SSD1306_WHITE, 18);
+        printCentered(uidBuf, 17, 1, SSD1306_WHITE, 20);
 
-        printCentered("Buffered In NVS", 30, 1, SSD1306_WHITE, 18);
+        printCentered("Buffered In NVS", 29, 1, SSD1306_WHITE, 20);
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        char qBuf[22];
-        snprintf(qBuf, sizeof(qBuf), "Queue #%d (Pending)", queuedCount);
-        printCentered(qBuf, 49, 1, SSD1306_WHITE, 19);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        char qBuf[24];
+        snprintf(qBuf, sizeof(qBuf), "Offline Queue: #%d", queuedCount);
+        printCentered(qBuf, 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -422,14 +431,14 @@ public:
         display.clearDisplay();
         drawHeader("[ SYNC COMPLETE ]");
 
-        printCentered("Wi-Fi Reconnected", 18, 1, SSD1306_WHITE, 18);
+        printCentered("Wi-Fi Reconnected", 17, 1, SSD1306_WHITE, 20);
 
-        char countBuf[22];
+        char countBuf[24];
         snprintf(countBuf, sizeof(countBuf), "Uploaded: %d Taps", syncedCount);
-        printCentered(countBuf, 30, 1, SSD1306_WHITE, 18);
+        printCentered(countBuf, 29, 1, SSD1306_WHITE, 20);
 
-        display.drawLine(0, 44, SCREEN_WIDTH, 44, SSD1306_WHITE);
-        printCentered("Cloud Synced OK", 49, 1, SSD1306_WHITE, 18);
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered("Cloud Synced OK", 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -442,7 +451,7 @@ public:
 
         drawHeader("KEYPAD OTP INGRESS");
 
-        printCentered("Enter 6-Digit PIN:", 15, 1, SSD1306_WHITE, 18);
+        printCentered("Enter 6-Digit PIN:", 15, 1, SSD1306_WHITE, 20);
 
         // Draw 6 clean digit frames centered on 128px screen:
         // 6 boxes of width 14px, 4px gap = 6*14 + 5*4 = 104px. Start X = (128 - 104) / 2 = 12px.
@@ -461,9 +470,9 @@ public:
 
         // Instructions Footer
         display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
-        char footBuf[22];
+        char footBuf[24];
         snprintf(footBuf, sizeof(footBuf), "#:OK *:Clr (%lus)", remainingSecs);
-        printCentered(footBuf, 49, 1, SSD1306_WHITE, 18);
+        printCentered(footBuf, 50, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
@@ -476,8 +485,8 @@ public:
 
         drawHeader("AUTHENTICATING");
 
-        printCentered(message, 26, 1, SSD1306_WHITE, 18);
-        printCentered("Please Wait...", 40, 1, SSD1306_WHITE, 18);
+        printCentered(message, 26, 1, SSD1306_WHITE, 20);
+        printCentered("Please Wait...", 40, 1, SSD1306_WHITE, 20);
 
         display.display();
     }
