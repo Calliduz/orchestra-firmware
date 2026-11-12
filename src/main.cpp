@@ -160,10 +160,10 @@ void setup() {
     }
 
     // 4. Initialize Wi-Fi Network Subsystem (Fast Non-blocking probe)
-    displayMgr.showConnectingWiFi("Probing Uplink...");
+    displayMgr.showConnectingWiFi("Scanning Wi-Fi...");
     netClient.begin();
 
-    bool wifiConnected = netClient.quickBootConnect(2000);
+    bool wifiConnected = netClient.quickBootConnect(4500);
 
     if (wifiConnected && netClient.isConnected()) {
         displayMgr.showConnectingWiFi(WiFi.SSID().c_str());

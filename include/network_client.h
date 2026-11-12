@@ -12,6 +12,7 @@
 #include "soc/rtc_cntl_reg.h"
 #include "config.h"
 #include "offline_storage.h"
+#include "display.h"
 
 struct TerminalApiResponse {
     int httpCode;
@@ -29,14 +30,15 @@ struct TerminalApiResponse {
 class OrchestraNetworkClient {
 private:
     enum WifiConnState {
-        WIFI_CONN_DISCONNECTED, // In cooldown between reconnect sweeps (zero radio/CPU usage)
-        WIFI_CONN_PROBING,      // Asynchronously connecting to current candidate AP
+        WIFI_CONN_DISCONNECTED, // In cooldown between reconnect sweeps (radio OFF)
+        WIFI_CONN_SCANNING,     // Asynchronously scanning for known APs in background (0ms CPU)
+        WIFI_CONN_PROBING,      // Asynchronously connecting to candidate AP
         WIFI_CONN_ACTIVE        // Uplink established and confirmed
     };
 
     WifiConnState connState = WIFI_CONN_DISCONNECTED;
-    size_t currentApIndex = 0;
     unsigned long probeStartTime = 0;
+    unsigned long scanStartTime = 0;
     unsigned long lastReconnectSweepTime = 0;
 
     void configureChannels() {
@@ -68,38 +70,97 @@ public:
     }
 
     /**
-     * Fast boot-time connection attempt (max 2000ms).
-     * If Wi-Fi is available, connects quickly.
-     * If router is off / network down, exits immediately within 2s without freezing boot!
+     * Fast boot-time connection attempt (max 4500ms).
+     * 1. Performs a fast active scan (120ms/chan) to discover which configured AP is actually nearby.
+     * 2. Automatically locks onto the AP with the STRONGEST signal (RSSI).
+     * 3. Directly associates using the scanned channel & BSSID to eliminate channel hunt delays.
+     * 4. If no configured AP is nearby, exits immediately into OFFLINE STANDBY in ~1.5s without freezing boot!
      */
-    bool quickBootConnect(uint32_t maxWaitMs = 2000) {
+    bool quickBootConnect(uint32_t maxConnectWaitMs = 4500) {
         if (WIFI_NETWORK_COUNT == 0) return false;
 
-        const char* ssid = WIFI_NETWORKS[0].ssid;
-        const char* pass = WIFI_NETWORKS[0].password;
-        Serial.printf("[WIFI BOOT] Probing primary AP '%s' (max %lums)...\n", ssid, (unsigned long)maxWaitMs);
-
+        WiFi.persistent(false);
+        WiFi.mode(WIFI_STA);
         WiFi.disconnect(true);
         delay(60);
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(ssid, pass);
+
+        Serial.println(F("[WIFI BOOT] Performing fast active scan (120ms/channel) for known APs..."));
+        displayMgr.showConnectingWiFi("Scanning Wi-Fi...");
+
+        // Fast active scan: 120ms per channel * 13 channels ~= 1.5 seconds total
+        int16_t numNetworks = WiFi.scanNetworks(false, false, false, 120);
+
+        int bestMatchIndex = -1;
+        int bestScannedIndex = -1;
+        int32_t bestRssi = -999;
+
+        if (numNetworks > 0) {
+            Serial.printf("[WIFI BOOT] Visible 2.4GHz networks found: %d\n", numNetworks);
+            for (int i = 0; i < numNetworks; i++) {
+                String s = WiFi.SSID(i);
+                int32_t r = WiFi.RSSI(i);
+                Serial.printf("  -> [%d] SSID: '%s', RSSI: %ld dBm, Ch: %d\n", i, s.c_str(), (long)r, (int)WiFi.channel(i));
+                for (size_t j = 0; j < WIFI_NETWORK_COUNT; j++) {
+                    if (s.equals(WIFI_NETWORKS[j].ssid)) {
+                        if (r > bestRssi) {
+                            bestRssi = r;
+                            bestMatchIndex = (int)j;
+                            bestScannedIndex = i;
+                        }
+                    }
+                }
+            }
+        } else {
+            Serial.println(F("[WIFI BOOT] No 2.4GHz networks detected in quick scan."));
+        }
+
+        const char* targetSsid = nullptr;
+        const char* targetPass = nullptr;
+        uint8_t targetChannel = 0;
+        const uint8_t* targetBssid = nullptr;
+
+        if (bestMatchIndex >= 0) {
+            targetSsid = WIFI_NETWORKS[bestMatchIndex].ssid;
+            targetPass = WIFI_NETWORKS[bestMatchIndex].password;
+            targetChannel = (uint8_t)WiFi.channel(bestScannedIndex);
+            targetBssid = WiFi.BSSID(bestScannedIndex);
+            Serial.printf("[WIFI BOOT] Best matching AP: '%s' (RSSI: %ld dBm, Ch: %d)\n",
+                          targetSsid, (long)bestRssi, (int)targetChannel);
+        } else {
+            // Fallback: If scan missed beacon or SSID was hidden, probe primary AP directly
+            Serial.println(F("[WIFI BOOT] No known AP matched in scan; probing primary AP fallback..."));
+            targetSsid = WIFI_NETWORKS[0].ssid;
+            targetPass = WIFI_NETWORKS[0].password;
+        }
+
+        displayMgr.showConnectingWiFi(targetSsid);
+        Serial.printf("[WIFI BOOT] Connecting to '%s' (timeout %lums)...\n", targetSsid, (unsigned long)maxConnectWaitMs);
+
+        if (targetChannel > 0 && targetBssid != nullptr) {
+            WiFi.begin(targetSsid, targetPass, targetChannel, targetBssid);
+        } else {
+            WiFi.begin(targetSsid, targetPass);
+        }
 
         unsigned long start = millis();
-        while (WiFi.status() != WL_CONNECTED && (millis() - start < maxWaitMs)) {
+        while (WiFi.status() != WL_CONNECTED && (millis() - start < maxConnectWaitMs)) {
             delay(100);
             if (WiFi.status() == WL_CONNECT_FAILED) break;
         }
 
+        WiFi.scanDelete();
+
         if (WiFi.status() == WL_CONNECTED) {
             connState = WIFI_CONN_ACTIVE;
-            Serial.printf("[WIFI BOOT] Connected to '%s'! IP: %s\n",
+            Serial.printf("[WIFI BOOT] Uplink established to '%s'! IP: %s\n",
                           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
             configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
             return true;
         }
 
-        Serial.println(F("[WIFI BOOT] No immediate uplink. Entering OFFLINE STANDBY mode immediately."));
+        Serial.printf("[WIFI BOOT] Connection to '%s' timed out. Entering OFFLINE STANDBY mode.\n", targetSsid);
         WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
         connState = WIFI_CONN_DISCONNECTED;
         lastReconnectSweepTime = millis();
         return false;
@@ -127,18 +188,16 @@ public:
 
         // 2. Link was dropped while previously connected
         if (connState == WIFI_CONN_ACTIVE) {
-            Serial.println(F("[WIFI] Uplink dropped! Powering down radio for quiet 60s offline operation..."));
+            Serial.println(F("[WIFI] Uplink dropped! Powering down radio for quiet offline operation..."));
             connState = WIFI_CONN_DISCONNECTED;
-            currentApIndex = 0;
             lastReconnectSweepTime = now;
             WiFi.disconnect(true);
             WiFi.mode(WIFI_OFF); // Power down 2.4GHz radio to eliminate RF noise on 13.56MHz MFRC522 coil
             return;
         }
 
-        // 3. In-flight Non-blocking Association Attempt (Max 2.0s probe)
+        // 3. In-flight Non-blocking Association Attempt (Max 4.0s probe)
         if (connState == WIFI_CONN_PROBING) {
-            // Succeeded in background
             if (status == WL_CONNECTED) {
                 connState = WIFI_CONN_ACTIVE;
                 Serial.printf(F("[WIFI] Reconnected to '%s'! IP: %s\n"),
@@ -147,32 +206,83 @@ public:
                 return;
             }
 
-            // If connection failed or 2.0s elapsed:
-            if (status == WL_CONNECT_FAILED || (now - probeStartTime >= 2000)) {
-                // Enter quiet 60-second offline sleep; power down radio so RFID runs at peak sensitivity
+            if (status == WL_CONNECT_FAILED || (now - probeStartTime >= 4000)) {
                 connState = WIFI_CONN_DISCONNECTED;
-                currentApIndex = 0;
                 lastReconnectSweepTime = now;
                 WiFi.disconnect(true);
                 WiFi.mode(WIFI_OFF);
-                Serial.println(F("[WIFI] Probe timed out. Radio powered off for 60s cooldown (MFRC522 at max sensitivity)."));
+                Serial.println(F("[WIFI] Background association timed out. Radio powered OFF for 20s cooldown."));
             }
             return;
         }
 
-        // 4. Disconnected / Cooldown Period
-        // Probes primary AP only once every 60 seconds (97% of time radio is completely dormant)
+        // 4. In-flight Asynchronous Background Scan
+        if (connState == WIFI_CONN_SCANNING) {
+            int16_t scanStatus = WiFi.scanComplete();
+
+            if (scanStatus == WIFI_SCAN_RUNNING) {
+                // Safety guard: if scan hangs for > 3.5s, cancel and power off
+                if (now - scanStartTime >= 3500) {
+                    WiFi.scanDelete();
+                    WiFi.mode(WIFI_OFF);
+                    connState = WIFI_CONN_DISCONNECTED;
+                    lastReconnectSweepTime = now;
+                }
+                return; // Non-blocking! Loop continues immediately
+            }
+
+            if (scanStatus > 0) {
+                int bestMatch = -1;
+                int bestScanIdx = -1;
+                int32_t bestRssi = -999;
+
+                for (int i = 0; i < scanStatus; i++) {
+                    String s = WiFi.SSID(i);
+                    int32_t r = WiFi.RSSI(i);
+                    for (size_t j = 0; j < WIFI_NETWORK_COUNT; j++) {
+                        if (s.equals(WIFI_NETWORKS[j].ssid)) {
+                            if (r > bestRssi) {
+                                bestRssi = r;
+                                bestMatch = (int)j;
+                                bestScanIdx = i;
+                            }
+                        }
+                    }
+                }
+
+                if (bestMatch >= 0) {
+                    const char* targetSsid = WIFI_NETWORKS[bestMatch].ssid;
+                    const char* targetPass = WIFI_NETWORKS[bestMatch].password;
+                    uint8_t chan = (uint8_t)WiFi.channel(bestScanIdx);
+                    const uint8_t* bssid = WiFi.BSSID(bestScanIdx);
+
+                    Serial.printf(F("[WIFI] Background scan found '%s' (%ld dBm). Probing uplink...\n"),
+                                  targetSsid, (long)bestRssi);
+                    WiFi.begin(targetSsid, targetPass, chan, bssid);
+                    WiFi.scanDelete();
+                    connState = WIFI_CONN_PROBING;
+                    probeStartTime = now;
+                    return;
+                }
+            }
+
+            // Scan completed with 0 matches or error: power down radio and wait 20s
+            WiFi.scanDelete();
+            WiFi.mode(WIFI_OFF);
+            connState = WIFI_CONN_DISCONNECTED;
+            lastReconnectSweepTime = now;
+            return;
+        }
+
+        // 5. Disconnected / Cooldown Period (20 seconds)
+        // Radio is 100% OFF during cooldown for pure 13.56MHz RFID sensitivity
         if (connState == WIFI_CONN_DISCONNECTED) {
-            if (now - lastReconnectSweepTime >= 60000) {
+            if (now - lastReconnectSweepTime >= 20000) {
                 lastReconnectSweepTime = now;
-                const char* primarySsid = WIFI_NETWORKS[0].ssid;
-                const char* primaryPass = WIFI_NETWORKS[0].password;
-                Serial.printf("[WIFI] Waking radio for quick background probe: '%s'...\n", primarySsid);
                 WiFi.mode(WIFI_STA);
-                WiFi.disconnect(false);
-                WiFi.begin(primarySsid, primaryPass);
-                connState = WIFI_CONN_PROBING;
-                probeStartTime = now;
+                WiFi.scanNetworks(true, false, false, 120); // ASYNC = true! Zero blocking!
+                connState = WIFI_CONN_SCANNING;
+                scanStartTime = now;
             }
         }
     }

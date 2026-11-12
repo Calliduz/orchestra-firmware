@@ -16,9 +16,14 @@ struct WifiCredential {
 // Configured Wi-Fi Access Points (auto-connects to the strongest available network)
 const WifiCredential WIFI_NETWORKS[] = {
     {"Copper",             "20220201"},
-    {"GodCalli",           "notcalli"},
+    {"Copper 5G",          "20220201"},
+    {"Compound 1",         "12032005"},
+    {"HatdogCheesedog",    "12032005@+"},
+    {"WirelessNet",        "12032005@+"},
+    {"WirelessNet-5G",     "12032005@+"},
     {"iPhone",             "cheesedog1203"},
     {"Iphone",             "20220201"},
+    {"GodCalli",           "notcalli"},
     {"Jisoo",              "00000000"},
     {"Lucky 8",            "D@lupang000"},
     {"IK603B PC (1)",      "QCU.Lab603#"},
