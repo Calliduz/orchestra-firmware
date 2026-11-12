@@ -85,6 +85,8 @@ String currentSectionCode = DEFAULT_SECTION;
 unsigned long lastStudentScanTime = 0;
 unsigned long feedbackStartTime = 0;
 unsigned long otpEntryStartTime = 0;
+unsigned long lastFacultyToggleTime = 0;
+const unsigned long FACULTY_TOGGLE_COOLDOWN_MS = 4000;
 
 // Keypad OTP Buffer
 char otpBuffer[7] = {0};
@@ -268,7 +270,9 @@ void loop() {
                     // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
                     if (!isTerminalLocked && cloudIsLocked) {
                         Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
+                        lastFacultyToggleTime = now;
                         isTerminalLocked = true;
+                        offlineStorage.resetSessionState();
                         audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
                         displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
                         stateAfterFeedback = STATE_LOCKED;
@@ -277,6 +281,7 @@ void loop() {
                     // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
                     else if (isTerminalLocked && !cloudIsLocked) {
                         Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
+                        lastFacultyToggleTime = now;
                         isTerminalLocked = false;
                         currentSectionCode = cloudSection;
                         audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
@@ -469,7 +474,15 @@ void handleOfflineCardTap(const String &cardUid) {
     bool isProf = offlineStorage.isAuthorizedProfessor(cardUid, profName, profRole);
 
     if (isProf) {
+        // Faculty Rapid Re-trigger Debounce Guard
+        if (millis() - lastFacultyToggleTime < FACULTY_TOGGLE_COOLDOWN_MS) {
+            Serial.printf(F("[DEBOUNCE OFFLINE] Faculty badge 0x%s presented within toggle cooldown (%lu ms). Suppressing tap.\n"),
+                          cardUid.c_str(), millis() - lastFacultyToggleTime);
+            return;
+        }
+
         // Faculty Master Badge tapped offline!
+        lastFacultyToggleTime = millis();
         if (isTerminalLocked) {
             // UNLOCK & OPEN OFFLINE SESSION
             isTerminalLocked = false;
@@ -579,6 +592,16 @@ void processRfidCard() {
     mfrc522.PICC_HaltA();
     mfrc522.PCD_StopCrypto1();
 
+    // Faculty Rapid Re-trigger & Card-Held Debounce Guard:
+    // If a faculty badge was toggled within 4000ms, suppress subsequent reads of faculty cards
+    String dummyName, dummyRole;
+    bool isFacultyBadge = offlineStorage.isAuthorizedProfessor(cardUid, dummyName, dummyRole);
+    if (isFacultyBadge && (millis() - lastFacultyToggleTime < FACULTY_TOGGLE_COOLDOWN_MS)) {
+        Serial.printf(F("[DEBOUNCE] Faculty badge 0x%s presented within toggle cooldown (%lu ms). Suppressing tap.\n"),
+                      cardUid.c_str(), millis() - lastFacultyToggleTime);
+        return;
+    }
+
     Serial.println();
     Serial.printf(F("[RFID EVENT] Interrogated ISO 14443A Tag: 0x%s\n"), cardUid.c_str());
 
@@ -618,6 +641,7 @@ void processRfidCard() {
     }
     else if (response.code == "SESSION_STARTED") {
         // Faculty Master Badge tapped to open session
+        lastFacultyToggleTime = millis();
         isTerminalLocked = false;
         currentSectionCode = response.sectionCode;
         audioLed.cueSessionStateChanged(true);
@@ -627,7 +651,9 @@ void processRfidCard() {
     }
     else if (response.code == "SESSION_CLOSED") {
         // Faculty Master Badge tapped to terminate session
+        lastFacultyToggleTime = millis();
         isTerminalLocked = true;
+        offlineStorage.resetSessionState();
         audioLed.cueSessionStateChanged(false);
         displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
         stateAfterFeedback = STATE_LOCKED;

@@ -176,11 +176,26 @@ public:
     }
 
     void updateFacultyList(const std::vector<FacultyCacheRecord> &newList) {
-        for (const auto &item : newList) {
-            addOrUpdateFacultyInMemory(item.rfidUid, item.name, item.role);
+        // Compare against existing cache to prevent flash write spam every sync cycle
+        bool changed = (newList.size() != facultyCache.size());
+        if (!changed) {
+            for (size_t i = 0; i < newList.size(); i++) {
+                if (!newList[i].rfidUid.equalsIgnoreCase(facultyCache[i].rfidUid) ||
+                    !newList[i].name.equals(facultyCache[i].name) ||
+                    !newList[i].role.equals(facultyCache[i].role)) {
+                    changed = true;
+                    break;
+                }
+            }
         }
-        saveFacultyToNvs();
-        Serial.printf(F("[OFFLINE STORAGE] Synced %u faculty instructor records from backend.\n"), facultyCache.size());
+
+        if (changed) {
+            for (const auto &item : newList) {
+                addOrUpdateFacultyInMemory(item.rfidUid, item.name, item.role);
+            }
+            saveFacultyToNvs();
+            Serial.printf(F("[OFFLINE STORAGE] Synced %u faculty instructor records from backend.\n"), facultyCache.size());
+        }
     }
 
     bool isAuthorizedProfessor(const String &cardUid, String &outName, String &outRole) {
@@ -357,6 +372,14 @@ public:
         offlineFacultyUid = normalizeUid(facultyUid);
         saveLogsToNvs();
         Serial.printf(F("[OFFLINE STORAGE] Marked offline session CLOSED by Prof 0x%s\n"), offlineFacultyUid.c_str());
+    }
+
+    void resetSessionState() {
+        offlineSessionAction = "CONTINUE";
+        offlineFacultyUid = "";
+        prefLogs.putString("act", "CONTINUE");
+        prefLogs.putString("fac_uid", "");
+        Serial.println(F("[OFFLINE STORAGE] Reset offline session action markers to CONTINUE."));
     }
 
     String getOfflineSessionAction() const {
