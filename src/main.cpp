@@ -283,6 +283,7 @@ void loop() {
                         Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
                         lastFacultyToggleTime = now;
                         isTerminalLocked = false;
+                        offlineStorage.resetSessionState();
                         currentSectionCode = cloudSection;
                         audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
                         displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
@@ -294,31 +295,38 @@ void loop() {
         }
     }
 
-    // 3b. Automatic Flush / Sync of Offline Buffered Attendance Records
+    // 3b. Automatic Flush / Sync of Offline Buffered Attendance Records (Seamless Background Execution)
     static unsigned long lastOfflineSyncAttempt = 0;
     if (netClient.isConnected() && offlineStorage.getPendingCount() > 0 &&
         (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN)) {
         if (now - lastOfflineSyncAttempt >= 4000) {
             lastOfflineSyncAttempt = now;
             int countToSync = offlineStorage.getPendingCount();
-            Serial.printf(F("[OFFLINE SYNC TRIGGER] Network link active! Uploading %d buffered taps...\n"), countToSync);
-            displayMgr.showProcessing("Syncing Logs...");
+
+            // CRITICAL SAFETY GUARD: If the terminal currently has an active session,
+            // NEVER send a "CLOSE" sessionAction! That would inadvertently terminate the live session!
+            String actionToSync = offlineStorage.getOfflineSessionAction();
+            if (!isTerminalLocked && actionToSync == "CLOSE") {
+                Serial.println(F("[OFFLINE SYNC GUARD] Active session in progress! Forcing sessionAction to CONTINUE."));
+                actionToSync = "CONTINUE";
+            }
+
+            Serial.printf(F("[OFFLINE SYNC TRIGGER] Seamlessly uploading %d buffered taps in background (Action: %s)...\n"),
+                          countToSync, actionToSync.c_str());
 
             int syncedCount = 0;
             bool success = netClient.postOfflineSync(
                 TERMINAL_ID,
-                offlineStorage.getOfflineSessionAction(),
+                actionToSync,
                 offlineStorage.getOfflineFacultyUid(),
                 offlineStorage.getRecords(),
                 syncedCount
             );
 
             if (success) {
-                audioLed.cueAccessGranted();
-                displayMgr.showOfflineSyncComplete(syncedCount);
+                Serial.printf(F("[OFFLINE SYNC] Background upload of %d taps completed cleanly.\n"), syncedCount);
                 offlineStorage.clearRecords();
-                stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
-                changeState(STATE_FEEDBACK_DISPLAY);
+                // Seamlessly remain in current state without interrupting scanning or taking over the display!
             }
         }
     }
@@ -449,7 +457,13 @@ void handlePacingInterlock() {
     }
 
     float remainingSeconds = (float)(PACING_COOLDOWN_MS - elapsed) / 1000.0f;
-    displayMgr.showPacingCooldown(remainingSeconds);
+
+    // Throttle display redraws to 10 FPS (100ms) to free up CPU and I2C bus bandwidth
+    static unsigned long lastPacingDraw = 0;
+    if (millis() - lastPacingDraw >= 100) {
+        lastPacingDraw = millis();
+        displayMgr.showPacingCooldown(remainingSeconds);
+    }
 
     // If an RFID card is presented during the pacing cooldown, reject immediately
     if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
@@ -612,13 +626,11 @@ void processRfidCard() {
         return;
     }
 
-    displayMgr.showProcessing("Validating RFID...");
-
     TerminalApiResponse response;
     bool reqSuccess = netClient.postRfidTap(cardUid, response);
 
-    // If request failed due to sudden network loss, fallback to offline storage
-    if (!reqSuccess || response.code == "OFFLINE" || response.code == "ERR_HTTP_FAIL") {
+    // If request failed due to actual network/transport failure (timeout or unreachable), fallback to offline storage
+    if (!reqSuccess || response.httpCode <= 0 || response.code == "OFFLINE" || response.code == "ERR_HTTP_FAIL") {
         Serial.println(F("[OFFLINE FALLBACK] Server unreachable during tap. Saving locally..."));
         handleOfflineCardTap(cardUid);
         return;
@@ -643,6 +655,7 @@ void processRfidCard() {
         // Faculty Master Badge tapped to open session
         lastFacultyToggleTime = millis();
         isTerminalLocked = false;
+        offlineStorage.resetSessionState();
         currentSectionCode = response.sectionCode;
         audioLed.cueSessionStateChanged(true);
         displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), response.facultyName.c_str());

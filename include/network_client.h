@@ -421,7 +421,7 @@ public:
         }
 
         http.end();
-        return (httpCode == 200 || httpCode == 201);
+        return (httpCode > 0);
     }
 
     bool postKeypadOtp(const String &otpPin, TerminalApiResponse &outResponse) {
@@ -469,7 +469,7 @@ public:
         }
 
         http.end();
-        return (httpCode == 200 || httpCode == 201);
+        return (httpCode > 0);
     }
 
     bool postOfflineSync(const String &termId, const String &sessionAction, const String &facultyUid, const std::vector<OfflineAttendanceRecord> &records, int &outSyncedCount) {

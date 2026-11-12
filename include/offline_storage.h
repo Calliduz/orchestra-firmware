@@ -217,7 +217,11 @@ public:
     void loadLogsFromNvs() {
         pendingLogs.clear();
         int count = prefLogs.getInt("log_count", 0);
-        if (count <= 0) return;
+        if (count <= 0) {
+            offlineSessionAction = "CONTINUE";
+            offlineFacultyUid = "";
+            return;
+        }
 
         offlineSessionAction = prefLogs.getString("act", "CONTINUE");
         offlineFacultyUid = prefLogs.getString("fac_uid", "");
