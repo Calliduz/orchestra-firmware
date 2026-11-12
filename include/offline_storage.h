@@ -5,6 +5,8 @@
 #include <Preferences.h>
 #include <vector>
 #include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 /**
  * Structure representing an authorized professor / faculty instructor
@@ -37,6 +39,7 @@ struct OfflineAttendanceRecord {
 
 class OfflineStorageManager {
 private:
+    SemaphoreHandle_t storageMutex = NULL;
     Preferences prefProf;
     Preferences prefLogs;
     std::vector<FacultyCacheRecord> facultyCache;
@@ -46,31 +49,40 @@ private:
     String offlineSessionAction = "CONTINUE"; // "START", "CLOSE", or "CONTINUE"
     String offlineFacultyUid = "";
 
+    void ensureMutex() {
+        if (storageMutex == NULL) {
+            storageMutex = xSemaphoreCreateRecursiveMutex();
+        }
+    }
+
+    void lock() {
+        ensureMutex();
+        if (storageMutex) {
+            xSemaphoreTakeRecursive(storageMutex, portMAX_DELAY);
+        }
+    }
+
+    void unlock() {
+        if (storageMutex) {
+            xSemaphoreGiveRecursive(storageMutex);
+        }
+    }
+
+    class LockGuard {
+        OfflineStorageManager &mgr;
+    public:
+        explicit LockGuard(OfflineStorageManager &m) : mgr(m) { mgr.lock(); }
+        ~LockGuard() { mgr.unlock(); }
+    };
+
     void seedDefaultFaculty() {
-        // Pre-seeded authorized instructors according to institutional directory:
-        // 1. Prof. Karlito Macadat (Faculty Instructor - AR101 / IT302)
-        addOrUpdateFacultyInMemory("892B2E8E", "Karlito Macadat", "FACULTY");
-        // 2. Prof. Justine Jay Agbada (Faculty Instructor)
-        addOrUpdateFacultyInMemory("71394417", "Justine Jay Agbada", "FACULTY");
-        // 3. System Administrator (Master Key Clearance)
-        addOrUpdateFacultyInMemory("99AA88BB", "System Administrator", "ADMIN");
+        // Purged hardcoded faculty PII. Authorized faculty dynamically synced from backend
+        // via syncTerminalStatus() and cached in persistent NVS.
     }
 
     void seedDefaultStudents() {
-        // Pre-seed known section students for instant offline name resolution
-        addOrUpdateStudentInMemory("91C6F380", "2023-0001-CCS", "Agbada, Justine");
-        addOrUpdateStudentInMemory("8173F980", "2023-0002-CCS", "Altichie, Rjhay");
-        addOrUpdateStudentInMemory("119255B1", "2023-0003-CCS", "Cabunoc, Josh");
-        addOrUpdateStudentInMemory("41860681", "2023-0004-CCS", "Dalupang, Juzten");
-        addOrUpdateStudentInMemory("50E5F6A7", "2023-0005-CCS", "Macadat Jr, K.");
-        addOrUpdateStudentInMemory("60F6A788", "2023-0006-CCS", "Malate, Denmark");
-        addOrUpdateStudentInMemory("70A7B8C9", "2023-0007-CCS", "Santos, Maria");
-        addOrUpdateStudentInMemory("80B8C9D0", "2023-0008-CCS", "Reyes, Juan");
-        addOrUpdateStudentInMemory("90C9D0E1", "2023-0009-CCS", "Dela Cruz, Bea");
-        addOrUpdateStudentInMemory("01D0E1F2", "2023-0010-CCS", "Tan, Lance");
-        addOrUpdateStudentInMemory("12E1F2A3", "2023-0011-CCS", "Garcia, Sofia");
-        addOrUpdateStudentInMemory("23F2A3B4", "2023-0012-CCS", "Bautista, Paolo");
-        addOrUpdateStudentInMemory("D1E219B1", "2023-0013-CCS", "Registered Student");
+        // Purged hardcoded student PII. Terminal delegates student identity verification to
+        // live backend tap validation and NVS offline log buffering.
     }
 
     void addOrUpdateFacultyInMemory(const String &uid, const String &name, const String &role) {
@@ -98,6 +110,10 @@ private:
     }
 
 public:
+    OfflineStorageManager() {
+        ensureMutex();
+    }
+
     static String normalizeUid(const String &uid) {
         String clean = "";
         for (size_t i = 0; i < uid.length(); i++) {
@@ -110,6 +126,7 @@ public:
     }
 
     void begin() {
+        LockGuard guard(*this);
         prefProf.begin("orch_prof", false);
         prefLogs.begin("orch_logs", false);
 
@@ -123,6 +140,7 @@ public:
     }
 
     bool findStudent(const String &cardUid, String &outName, String &outStudentId) {
+        LockGuard guard(*this);
         String clean = normalizeUid(cardUid);
         for (const auto &s : studentCache) {
             if (s.rfidUid.equalsIgnoreCase(clean)) {
@@ -130,6 +148,11 @@ public:
                 outStudentId = s.studentId;
                 return true;
             }
+        }
+        if (clean.length() > 0) {
+            outName = "Student (0x" + clean + ")";
+            outStudentId = "OFFLINE-TAG";
+            return true;
         }
         return false;
     }
@@ -139,6 +162,7 @@ public:
     // =========================================================================
 
     void loadFacultyFromNvs() {
+        LockGuard guard(*this);
         int count = prefProf.getInt("count", 0);
         if (count <= 0) return;
 
@@ -159,6 +183,7 @@ public:
     }
 
     void saveFacultyToNvs() {
+        LockGuard guard(*this);
         prefProf.clear();
         int count = (int)facultyCache.size();
         prefProf.putInt("count", count);
@@ -176,6 +201,7 @@ public:
     }
 
     void updateFacultyList(const std::vector<FacultyCacheRecord> &newList) {
+        LockGuard guard(*this);
         // Compare against existing cache to prevent flash write spam every sync cycle
         bool changed = (newList.size() != facultyCache.size());
         if (!changed) {
@@ -199,6 +225,7 @@ public:
     }
 
     bool isAuthorizedProfessor(const String &cardUid, String &outName, String &outRole) {
+        LockGuard guard(*this);
         String clean = normalizeUid(cardUid);
         for (const auto &f : facultyCache) {
             if (f.rfidUid.equalsIgnoreCase(clean)) {
@@ -215,6 +242,7 @@ public:
     // =========================================================================
 
     void loadLogsFromNvs() {
+        LockGuard guard(*this);
         pendingLogs.clear();
         int count = prefLogs.getInt("log_count", 0);
         if (count <= 0) {
@@ -247,6 +275,7 @@ public:
     }
 
     void appendLogToNvs(const OfflineAttendanceRecord &rec, int index) {
+        LockGuard guard(*this);
         char kU[16], kT[16], kM[16];
         snprintf(kU, sizeof(kU), "lu_%d", index);
         snprintf(kT, sizeof(kT), "lt_%d", index);
@@ -263,6 +292,7 @@ public:
     }
 
     void saveLogsToNvs() {
+        LockGuard guard(*this);
         prefLogs.clear();
         int count = (int)pendingLogs.size();
         prefLogs.putInt("log_count", count);
@@ -285,6 +315,7 @@ public:
      * Local Anti-Passback check against offline buffer
      */
     bool isAlreadyLogged(const String &cardUid) {
+        LockGuard guard(*this);
         String clean = normalizeUid(cardUid);
         for (const auto &rec : pendingLogs) {
             if (clean.equalsIgnoreCase(rec.rfidUid)) {
@@ -298,6 +329,7 @@ public:
      * Append offline attendance log (Fast 2ms append write)
      */
     bool addRecord(const String &cardUid, const String &timestamp = "", const String &authMethod = "RFID_TAP") {
+        LockGuard guard(*this);
         if (pendingLogs.size() >= 100) {
             Serial.println(F("[OFFLINE STORAGE] Storage queue full (max 100 records)."));
             return false;
@@ -344,15 +376,18 @@ public:
         return true;
     }
 
-    int getPendingCount() const {
+    int getPendingCount() {
+        LockGuard guard(*this);
         return (int)pendingLogs.size();
     }
 
-    const std::vector<OfflineAttendanceRecord>& getRecords() const {
+    std::vector<OfflineAttendanceRecord> getRecords() {
+        LockGuard guard(*this);
         return pendingLogs;
     }
 
     void clearRecords() {
+        LockGuard guard(*this);
         pendingLogs.clear();
         offlineSessionAction = "CONTINUE";
         offlineFacultyUid = "";
@@ -365,6 +400,7 @@ public:
     // =========================================================================
 
     void markOfflineSessionStarted(const String &facultyUid) {
+        LockGuard guard(*this);
         offlineSessionAction = "START";
         offlineFacultyUid = normalizeUid(facultyUid);
         saveLogsToNvs();
@@ -372,6 +408,7 @@ public:
     }
 
     void markOfflineSessionClosed(const String &facultyUid) {
+        LockGuard guard(*this);
         offlineSessionAction = "CLOSE";
         offlineFacultyUid = normalizeUid(facultyUid);
         saveLogsToNvs();
@@ -379,6 +416,7 @@ public:
     }
 
     void resetSessionState() {
+        LockGuard guard(*this);
         offlineSessionAction = "CONTINUE";
         offlineFacultyUid = "";
         prefLogs.putString("act", "CONTINUE");
@@ -386,11 +424,13 @@ public:
         Serial.println(F("[OFFLINE STORAGE] Reset offline session action markers to CONTINUE."));
     }
 
-    String getOfflineSessionAction() const {
+    String getOfflineSessionAction() {
+        LockGuard guard(*this);
         return offlineSessionAction;
     }
 
-    String getOfflineFacultyUid() const {
+    String getOfflineFacultyUid() {
+        LockGuard guard(*this);
         return offlineFacultyUid;
     }
 };

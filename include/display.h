@@ -462,7 +462,7 @@ public:
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             if (i < length) {
-                display.print(buffer[i]);
+                display.print('*');
             } else {
                 display.print('-');
             }

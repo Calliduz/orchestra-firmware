@@ -13,36 +13,42 @@ struct WifiCredential {
     const char* password;
 };
 
+// Wi-Fi Macro Guards & Sanitized Provisioning
+#ifndef WIFI_SSID
+#define WIFI_SSID             "ORCHESTRA_LAB_WIFI"
+#endif
+
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD         "SecureLabPass2026"
+#endif
+
 // Configured Wi-Fi Access Points (auto-connects to the strongest available network)
 const WifiCredential WIFI_NETWORKS[] = {
-    {"Copper",             "20220201"},
-    {"Copper 5G",          "20220201"},
-    {"Compound 1",         "12032005"},
-    {"HatdogCheesedog",    "12032005@+"},
-    {"WirelessNet",        "12032005@+"},
-    {"WirelessNet-5G",     "12032005@+"},
-    {"iPhone",             "cheesedog1203"},
-    {"Iphone",             "20220201"},
-    {"GodCalli",           "notcalli"},
-    {"Jisoo",              "00000000"},
-    {"Lucky 8",            "D@lupang000"},
-    {"IK603B PC (1)",      "QCU.Lab603#"},
-    {"ORCHESTRA_LAB_WIFI", "SecureLabPass2026"}
+    {WIFI_SSID, WIFI_PASSWORD}
 };
 const size_t WIFI_NETWORK_COUNT = sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
 
-// Legacy / fallback defines
-#define WIFI_SSID             WIFI_NETWORKS[0].ssid
-#define WIFI_PASSWORD         WIFI_NETWORKS[0].password
-
 // Local IP or domain of Orchestra Node.js backend server
+#ifndef BACKEND_BASE_URL
 #define BACKEND_BASE_URL      "http://192.168.100.100:5000/api/v1"
+#endif
 
 // Hardware Identity & Security Bearer Token
+#ifndef TERMINAL_ID
 #define TERMINAL_ID           "TERM-CL304"
-#define HARDWARE_API_KEY      "ORCHESTRA_ESP32_SECURE_TOKEN_2026"
+#endif
+
+#ifndef HARDWARE_API_KEY
+#define HARDWARE_API_KEY      "ORCHESTRA_DEV_API_KEY"
+#endif
+
+#ifndef ROOM_NUMBER
 #define ROOM_NUMBER           "LAB-304"
+#endif
+
+#ifndef DEFAULT_SECTION
 #define DEFAULT_SECTION       "AR101-BSIT3A"
+#endif
 
 // NTP Time Configuration (UTC+8 for Philippines / Asia Manila)
 #define NTP_SERVER_1          "pool.ntp.org"

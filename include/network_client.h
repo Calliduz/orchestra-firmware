@@ -8,8 +8,8 @@
 #include <vector>
 #include <algorithm>
 #include "esp_wifi.h"
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "config.h"
 #include "offline_storage.h"
 #include "display.h"
@@ -29,6 +29,34 @@ struct TerminalApiResponse {
 
 class OrchestraNetworkClient {
 private:
+    SemaphoreHandle_t netMutex = NULL;
+
+    void ensureNetMutex() {
+        if (netMutex == NULL) {
+            netMutex = xSemaphoreCreateRecursiveMutex();
+        }
+    }
+
+    void lockNet() {
+        ensureNetMutex();
+        if (netMutex) {
+            xSemaphoreTakeRecursive(netMutex, portMAX_DELAY);
+        }
+    }
+
+    void unlockNet() {
+        if (netMutex) {
+            xSemaphoreGiveRecursive(netMutex);
+        }
+    }
+
+    class NetLockGuard {
+        OrchestraNetworkClient &client;
+    public:
+        explicit NetLockGuard(OrchestraNetworkClient &c) : client(c) { client.lockNet(); }
+        ~NetLockGuard() { client.unlockNet(); }
+    };
+
     enum WifiConnState {
         WIFI_CONN_DISCONNECTED, // In cooldown between reconnect sweeps (radio OFF)
         WIFI_CONN_SCANNING,     // Asynchronously scanning for known APs in background (0ms CPU)
@@ -54,8 +82,12 @@ private:
     }
 
 public:
+    OrchestraNetworkClient() {
+        ensureNetMutex();
+    }
+
     void begin() {
-        WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable BOD to prevent Wi-Fi peak current resets
+        NetLockGuard guard(*this);
         WiFi.persistent(false);                     // Do not wear flash NVS on Wi-Fi state shifts
         WiFi.mode(WIFI_STA);
         WiFi.setTxPower(WIFI_POWER_15dBm);
@@ -77,6 +109,7 @@ public:
      * immediately aborts the scan and cuts radio power in microseconds!
      */
     void resetCooldown(unsigned long now) {
+        NetLockGuard guard(*this);
         lastReconnectSweepTime = now;
         if (connState == WIFI_CONN_SCANNING) {
             WiFi.scanDelete();
@@ -96,6 +129,7 @@ public:
      * Instantly initiates a background active Wi-Fi scan without waiting for the 60s timer.
      */
     void forceReconnectNow() {
+        NetLockGuard guard(*this);
         if (connState == WIFI_CONN_ACTIVE) {
             Serial.println(F("[WIFI MANUAL] Wi-Fi link already active."));
             return;
@@ -213,6 +247,7 @@ public:
      * and keypad polling running at maximum speed even during network outages.
      */
     void maintainConnection(unsigned long now) {
+        NetLockGuard guard(*this);
         wl_status_t status = WiFi.status();
 
         // 1. Currently Active Link

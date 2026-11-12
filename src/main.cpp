@@ -24,8 +24,10 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <Keypad.h>
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 
 #include "config.h"
 #include "audio_led.h"
@@ -92,13 +94,100 @@ const unsigned long FACULTY_TOGGLE_COOLDOWN_MS = 4000;
 char otpBuffer[7] = {0};
 int otpBufferLength = 0;
 
+// FreeRTOS Task Decoupling Data Structures & Queues
+enum NetEventType {
+    NET_EVENT_NONE = 0,
+    NET_EVENT_RFID_TAP,
+    NET_EVENT_KEYPAD_OTP,
+    NET_EVENT_FORCE_RECONNECT
+};
+
+struct NetRequestEvent {
+    NetEventType type;
+    char payload[32];
+    unsigned long timestamp;
+};
+
+struct NetResponseEvent {
+    NetEventType type;
+    int httpCode;
+    char code[32];
+    char message[64];
+    char studentName[48];
+    char studentId[24];
+    char status[24];
+    char sectionCode[32];
+    char facultyName[48];
+    bool isRegistered;
+    char cardHolder[48];
+    char originalPayload[32];
+};
+
+struct CloudStatusMessage {
+    bool isLocked;
+    char sectionCode[32];
+    bool enrollmentActive;
+    char targetRole[16];
+    char targetName[48];
+};
+
+QueueHandle_t netRequestQueue = NULL;
+QueueHandle_t netResponseQueue = NULL;
+QueueHandle_t cloudStatusQueue = NULL;
+TaskHandle_t networkTaskHandle = NULL;
+
+String currentPendingUid = "";
+unsigned long stateProcessingStartTime = 0;
+
 // Forward Declarations
 void changeState(TerminalState newState);
 void processRfidCard();
 void handleKeypadInput();
 void handlePacingInterlock();
+void handleOfflineCardTap(const String &cardUid);
+void handleNetworkResponse(const NetResponseEvent &resp);
+void handleCloudStatusUpdate(const CloudStatusMessage &cloudMsg);
+void networkWorkerTask(void *pvParameters);
 String getCardUidHex(MFRC522::Uid *uid);
 void getCurrent12HourClock(char* timeBuf, size_t timeSize, char* dateBuf, size_t dateSize);
+void copyApiToNetResponse(const TerminalApiResponse &api, const char* originalPayload, NetResponseEvent &out);
+
+// Helper: Convert TerminalApiResponse to POD NetResponseEvent for FreeRTOS queue transfer
+void copyApiToNetResponse(const TerminalApiResponse &api, const char* originalPayload, NetResponseEvent &out) {
+    out.httpCode = api.httpCode;
+    strncpy(out.code, api.code.c_str(), sizeof(out.code) - 1);
+    out.code[sizeof(out.code) - 1] = '\0';
+
+    strncpy(out.message, api.message.c_str(), sizeof(out.message) - 1);
+    out.message[sizeof(out.message) - 1] = '\0';
+
+    strncpy(out.studentName, api.studentName.c_str(), sizeof(out.studentName) - 1);
+    out.studentName[sizeof(out.studentName) - 1] = '\0';
+
+    strncpy(out.studentId, api.studentId.c_str(), sizeof(out.studentId) - 1);
+    out.studentId[sizeof(out.studentId) - 1] = '\0';
+
+    strncpy(out.status, api.status.c_str(), sizeof(out.status) - 1);
+    out.status[sizeof(out.status) - 1] = '\0';
+
+    strncpy(out.sectionCode, api.sectionCode.c_str(), sizeof(out.sectionCode) - 1);
+    out.sectionCode[sizeof(out.sectionCode) - 1] = '\0';
+
+    strncpy(out.facultyName, api.facultyName.c_str(), sizeof(out.facultyName) - 1);
+    out.facultyName[sizeof(out.facultyName) - 1] = '\0';
+
+    out.isRegistered = api.isRegistered;
+
+    strncpy(out.cardHolder, api.cardHolder.c_str(), sizeof(out.cardHolder) - 1);
+    out.cardHolder[sizeof(out.cardHolder) - 1] = '\0';
+
+    if (originalPayload != NULL) {
+        strncpy(out.originalPayload, originalPayload, sizeof(out.originalPayload) - 1);
+        out.originalPayload[sizeof(out.originalPayload) - 1] = '\0';
+    } else {
+        out.originalPayload[0] = '\0';
+    }
+}
 
 // Helper: Extract 12-hour formatted time (AM/PM) and date from RTC / SNTP
 void getCurrent12HourClock(char* timeBuf, size_t timeSize, char* dateBuf, size_t dateSize) {
@@ -116,10 +205,147 @@ void getCurrent12HourClock(char* timeBuf, size_t timeSize, char* dateBuf, size_t
 }
 
 // =========================================================================
+// FREERTOS BACKGROUND NETWORK WORKER TASK (PINNED TO CORE 0)
+// =========================================================================
+void networkWorkerTask(void *pvParameters) {
+    Serial.println(F("[TASK] NetworkWorkerTask started on Core 0."));
+    unsigned long lastStatusSync = 0;
+    unsigned long lastOfflineSync = 0;
+
+    bool lastIsLocked = isTerminalLocked;
+    String lastSection = currentSectionCode;
+    bool lastEnrollActive = isEnrollmentMode;
+    String lastRole = enrollmentTargetRole;
+    String lastName = enrollmentTargetName;
+
+    while (true) {
+        unsigned long now = millis();
+
+        // 1. Service any pending interactive requests with top priority
+        NetRequestEvent req;
+        if (netRequestQueue && xQueueReceive(netRequestQueue, &req, pdMS_TO_TICKS(40)) == pdTRUE) {
+            if (req.type == NET_EVENT_RFID_TAP) {
+                Serial.printf(F("[TASK Core 0] Servicing RFID tap: %s\n"), req.payload);
+                TerminalApiResponse apiResp;
+                netClient.postRfidTap(String(req.payload), apiResp);
+
+                NetResponseEvent resp;
+                copyApiToNetResponse(apiResp, req.payload, resp);
+                resp.type = NET_EVENT_RFID_TAP;
+                if (netResponseQueue) {
+                    xQueueSend(netResponseQueue, &resp, pdMS_TO_TICKS(200));
+                }
+            } else if (req.type == NET_EVENT_KEYPAD_OTP) {
+                Serial.printf(F("[TASK Core 0] Servicing Keypad OTP: %s\n"), req.payload);
+                TerminalApiResponse apiResp;
+                netClient.postKeypadOtp(String(req.payload), apiResp);
+
+                NetResponseEvent resp;
+                copyApiToNetResponse(apiResp, req.payload, resp);
+                resp.type = NET_EVENT_KEYPAD_OTP;
+                if (netResponseQueue) {
+                    xQueueSend(netResponseQueue, &resp, pdMS_TO_TICKS(200));
+                }
+            } else if (req.type == NET_EVENT_FORCE_RECONNECT) {
+                Serial.println(F("[TASK Core 0] Immediate Wi-Fi reconnect triggered."));
+                netClient.forceReconnectNow();
+            }
+        }
+
+        // Cooperative yield to ESP-IDF Wi-Fi/LwIP stack on Core 0
+        vTaskDelay(pdMS_TO_TICKS(10));
+        now = millis();
+
+        // 2. Wi-Fi state machine maintenance
+        netClient.maintainConnection(now);
+
+        // 3. Periodic Cloud Status Sync (every 2500ms when connected)
+        if (netClient.isConnected() && (now - lastStatusSync >= 2500)) {
+            // Prioritize interactive user taps over background poll
+            if (netRequestQueue && uxQueueMessagesWaiting(netRequestQueue) == 0) {
+                lastStatusSync = now;
+                bool cloudIsLocked = lastIsLocked;
+                String cloudSection = lastSection;
+                bool cloudEnrollmentActive = lastEnrollActive;
+                String cloudTargetRole = lastRole;
+                String cloudTargetName = lastName;
+
+                if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole, cloudTargetName)) {
+                    bool changed = (cloudIsLocked != lastIsLocked) ||
+                                   (cloudSection != lastSection) ||
+                                   (cloudEnrollmentActive != lastEnrollActive) ||
+                                   (cloudTargetRole != lastRole) ||
+                                   (cloudTargetName != lastName);
+
+                    if (changed) {
+                        lastIsLocked = cloudIsLocked;
+                        lastSection = cloudSection;
+                        lastEnrollActive = cloudEnrollmentActive;
+                        lastRole = cloudTargetRole;
+                        lastName = cloudTargetName;
+
+                        CloudStatusMessage msg;
+                        msg.isLocked = cloudIsLocked;
+                        strncpy(msg.sectionCode, cloudSection.c_str(), sizeof(msg.sectionCode) - 1);
+                        msg.sectionCode[sizeof(msg.sectionCode) - 1] = '\0';
+                        msg.enrollmentActive = cloudEnrollmentActive;
+                        strncpy(msg.targetRole, cloudTargetRole.c_str(), sizeof(msg.targetRole) - 1);
+                        msg.targetRole[sizeof(msg.targetRole) - 1] = '\0';
+                        strncpy(msg.targetName, cloudTargetName.c_str(), sizeof(msg.targetName) - 1);
+                        msg.targetName[sizeof(msg.targetName) - 1] = '\0';
+
+                        if (cloudStatusQueue) {
+                            xQueueSend(cloudStatusQueue, &msg, pdMS_TO_TICKS(50));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cooperative yield
+        vTaskDelay(pdMS_TO_TICKS(10));
+        now = millis();
+
+        // 4. Background Offline Attendance Batch Sync (every 4000ms when records exist)
+        if (netClient.isConnected() && (offlineStorage.getPendingCount() > 0) && (now - lastOfflineSync >= 4000)) {
+            if (netRequestQueue && uxQueueMessagesWaiting(netRequestQueue) == 0) {
+                lastOfflineSync = now;
+                String actionToSync = offlineStorage.getOfflineSessionAction();
+                String facultyUid = offlineStorage.getOfflineFacultyUid();
+
+                // Safety guard: if session is active locally, don't accidentally CLOSE
+                if (!lastIsLocked && actionToSync == "CLOSE") {
+                    actionToSync = "CONTINUE";
+                }
+
+                std::vector<OfflineAttendanceRecord> records = offlineStorage.getRecords();
+                if (!records.empty()) {
+                    int syncedCount = 0;
+                    bool ok = netClient.postOfflineSync(
+                        TERMINAL_ID,
+                        actionToSync,
+                        facultyUid,
+                        records,
+                        syncedCount
+                    );
+                    if (ok) {
+                        offlineStorage.clearRecords();
+                        Serial.printf(F("[OFFLINE SYNC] Background upload of %d records succeeded on Core 0.\n"), syncedCount);
+                    }
+                }
+            }
+        }
+
+        // Cooperative yield to keep Core 0 responsive
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+}
+
+// =========================================================================
 // SYSTEM INITIALIZATION (SETUP)
 // =========================================================================
 void setup() {
-    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector immediately
+    // Hardware Brown-Out Detector (BOD) remains active (register disable removed for power stability)
     Serial.begin(SERIAL_BAUD_RATE);
     delay(250);
 
@@ -194,6 +420,21 @@ void setup() {
         Serial.println(F("[WIFI] Operating in OFFLINE STANDBY mode (Radio OFF for pure 13.56MHz RFID sensitivity)."));
     }
 
+    // 5. Initialize FreeRTOS Queues & Network Worker Task pinned to Core 0
+    netRequestQueue = xQueueCreate(8, sizeof(NetRequestEvent));
+    netResponseQueue = xQueueCreate(8, sizeof(NetResponseEvent));
+    cloudStatusQueue = xQueueCreate(4, sizeof(CloudStatusMessage));
+
+    xTaskCreatePinnedToCore(
+        networkWorkerTask,
+        "NetworkWorker",
+        8192,
+        NULL,
+        1,
+        &networkTaskHandle,
+        0
+    );
+
     // Initial state transition
     if (isEnrollmentMode) {
         changeState(STATE_ENROLLMENT_SCAN);
@@ -210,8 +451,11 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // 1. Maintain background Wi-Fi connection
-    netClient.maintainConnection(now);
+    // 1. Receive asynchronous cloud session state updates from Core 0 NetworkWorkerTask
+    CloudStatusMessage cloudMsg;
+    if (cloudStatusQueue && xQueueReceive(cloudStatusQueue, &cloudMsg, 0) == pdTRUE) {
+        handleCloudStatusUpdate(cloudMsg);
+    }
 
     // 2. Periodic 1-second display refresh during idle states to keep the 12-hour clock ticking live
     static unsigned long lastClockTick = 0;
@@ -232,106 +476,7 @@ void loop() {
         }
     }
 
-    // 3. Periodic Cloud Session State Synchronization (Every 2.5s)
-    // Synchronizes remote session termination, activation, or admin enrollment mode from the web portal
-    static unsigned long lastSessionSyncTime = 0;
-    if (netClient.isConnected() && (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN || currentState == STATE_ENROLLMENT_SCAN)) {
-        if (now - lastSessionSyncTime >= 2500) {
-            lastSessionSyncTime = now;
-            bool cloudIsLocked = isTerminalLocked;
-            String cloudSection = currentSectionCode;
-            bool cloudEnrollmentActive = isEnrollmentMode;
-            String cloudTargetRole = enrollmentTargetRole;
-            String cloudTargetName = enrollmentTargetName;
-
-            if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole, cloudTargetName)) {
-                // CASE 0: Live Admin RFID Enrollment Mode toggled
-                if (!isEnrollmentMode && cloudEnrollmentActive) {
-                    Serial.printf(F("[REMOTE EVENT] Admin initiated RFID Enrollment Mode for %s (%s)!\n"),
-                                  cloudTargetRole.c_str(), cloudTargetName.c_str());
-                    isEnrollmentMode = true;
-                    enrollmentTargetRole = cloudTargetRole;
-                    enrollmentTargetName = cloudTargetName;
-                    audioLed.cueAccessGranted();
-                    changeState(STATE_ENROLLMENT_SCAN);
-                } else if (isEnrollmentMode && !cloudEnrollmentActive) {
-                    Serial.println(F("[REMOTE EVENT] Admin closed RFID Enrollment Mode. Restoring state..."));
-                    isEnrollmentMode = false;
-                    enrollmentTargetName = "";
-                    audioLed.playKeypadClick();
-                    changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
-                } else if (isEnrollmentMode && cloudEnrollmentActive && (cloudTargetRole != enrollmentTargetRole || cloudTargetName != enrollmentTargetName)) {
-                    enrollmentTargetRole = cloudTargetRole;
-                    enrollmentTargetName = cloudTargetName;
-                    displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
-                }
-                // CASE A & B: Normal Session State Transitions when not in enrollment mode
-                else if (!isEnrollmentMode) {
-                    // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
-                    if (!isTerminalLocked && cloudIsLocked) {
-                        Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
-                        lastFacultyToggleTime = now;
-                        isTerminalLocked = true;
-                        offlineStorage.resetSessionState();
-                        audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
-                        displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
-                        stateAfterFeedback = STATE_LOCKED;
-                        changeState(STATE_FEEDBACK_DISPLAY);
-                    }
-                    // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
-                    else if (isTerminalLocked && !cloudIsLocked) {
-                        Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
-                        lastFacultyToggleTime = now;
-                        isTerminalLocked = false;
-                        offlineStorage.resetSessionState();
-                        currentSectionCode = cloudSection;
-                        audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
-                        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
-                        stateAfterFeedback = STATE_IDLE_SCAN;
-                        changeState(STATE_FEEDBACK_DISPLAY);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3b. Automatic Flush / Sync of Offline Buffered Attendance Records (Seamless Background Execution)
-    static unsigned long lastOfflineSyncAttempt = 0;
-    if (netClient.isConnected() && offlineStorage.getPendingCount() > 0 &&
-        (currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN)) {
-        if (now - lastOfflineSyncAttempt >= 4000) {
-            lastOfflineSyncAttempt = now;
-            int countToSync = offlineStorage.getPendingCount();
-
-            // CRITICAL SAFETY GUARD: If the terminal currently has an active session,
-            // NEVER send a "CLOSE" sessionAction! That would inadvertently terminate the live session!
-            String actionToSync = offlineStorage.getOfflineSessionAction();
-            if (!isTerminalLocked && actionToSync == "CLOSE") {
-                Serial.println(F("[OFFLINE SYNC GUARD] Active session in progress! Forcing sessionAction to CONTINUE."));
-                actionToSync = "CONTINUE";
-            }
-
-            Serial.printf(F("[OFFLINE SYNC TRIGGER] Seamlessly uploading %d buffered taps in background (Action: %s)...\n"),
-                          countToSync, actionToSync.c_str());
-
-            int syncedCount = 0;
-            bool success = netClient.postOfflineSync(
-                TERMINAL_ID,
-                actionToSync,
-                offlineStorage.getOfflineFacultyUid(),
-                offlineStorage.getRecords(),
-                syncedCount
-            );
-
-            if (success) {
-                Serial.printf(F("[OFFLINE SYNC] Background upload of %d taps completed cleanly.\n"), syncedCount);
-                offlineStorage.clearRecords();
-                // Seamlessly remain in current state without interrupting scanning or taking over the display!
-            }
-        }
-    }
-
-    // 4. State Machine Dispatcher
+    // 3. State Machine Dispatcher
     switch (currentState) {
         case STATE_LOCKED: {
             audioLed.setLeds(false, true); // Solid red status LED during locked state
@@ -375,6 +520,17 @@ void loop() {
             break;
         }
 
+        case STATE_PROCESSING: {
+            NetResponseEvent resp;
+            if (netResponseQueue && xQueueReceive(netResponseQueue, &resp, 0) == pdTRUE) {
+                handleNetworkResponse(resp);
+            } else if (millis() - stateProcessingStartTime >= 4000) {
+                Serial.println(F("[TIMEOUT] Network worker timeout! Fallback to offline storage."));
+                handleOfflineCardTap(currentPendingUid);
+            }
+            break;
+        }
+
         case STATE_FEEDBACK_DISPLAY: {
             if (now - feedbackStartTime >= RESULT_DISPLAY_DURATION_MS) {
                 audioLed.setLeds(false, false);
@@ -386,6 +542,9 @@ void loop() {
         default:
             break;
     }
+
+    // High-frequency sensor scanning yields briefly to FreeRTOS IDLE task on Core 1
+    vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 // =========================================================================
@@ -432,6 +591,10 @@ void changeState(TerminalState newState) {
             displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
             Serial.printf(F("[FSM] State -> STATE_ENROLLMENT_SCAN (Live Admin Provisioning for %s: %s)\n"),
                           enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
+            break;
+
+        case STATE_PROCESSING:
+            Serial.println(F("[FSM] State -> STATE_PROCESSING (Awaiting Core 0 Network Response)"));
             break;
 
         case STATE_FEEDBACK_DISPLAY:
@@ -626,43 +789,143 @@ void processRfidCard() {
         return;
     }
 
-    TerminalApiResponse response;
-    bool reqSuccess = netClient.postRfidTap(cardUid, response);
+    // ONLINE: Dispatch via FreeRTOS queue to Core 0 NetworkWorkerTask (Zero loop blocking!)
+    displayMgr.showProcessing("Validating Tag...");
+    currentPendingUid = cardUid;
+    stateProcessingStartTime = millis();
+
+    NetRequestEvent req;
+    req.type = NET_EVENT_RFID_TAP;
+    strncpy(req.payload, cardUid.c_str(), sizeof(req.payload) - 1);
+    req.payload[sizeof(req.payload) - 1] = '\0';
+    req.timestamp = millis();
+
+    if (!netRequestQueue || xQueueSend(netRequestQueue, &req, 0) != pdTRUE) {
+        Serial.println(F("[QUEUE FULL] Network request queue full! Fallback to offline storage."));
+        handleOfflineCardTap(cardUid);
+        return;
+    }
+
+    changeState(STATE_PROCESSING);
+}
+
+// =========================================================================
+// ASYNCHRONOUS CLOUD STATUS & NETWORK RESPONSE HANDLERS
+// =========================================================================
+void handleCloudStatusUpdate(const CloudStatusMessage &cloudMsg) {
+    bool cloudIsLocked = cloudMsg.isLocked;
+    String cloudSection = String(cloudMsg.sectionCode);
+    bool cloudEnrollmentActive = cloudMsg.enrollmentActive;
+    String cloudTargetRole = String(cloudMsg.targetRole);
+    String cloudTargetName = String(cloudMsg.targetName);
+
+    // CASE 0: Live Admin RFID Enrollment Mode toggled
+    if (!isEnrollmentMode && cloudEnrollmentActive) {
+        Serial.printf(F("[REMOTE EVENT] Admin initiated RFID Enrollment Mode for %s (%s)!\n"),
+                      cloudTargetRole.c_str(), cloudTargetName.c_str());
+        isEnrollmentMode = true;
+        enrollmentTargetRole = cloudTargetRole;
+        enrollmentTargetName = cloudTargetName;
+        audioLed.cueAccessGranted();
+        changeState(STATE_ENROLLMENT_SCAN);
+    } else if (isEnrollmentMode && !cloudEnrollmentActive) {
+        Serial.println(F("[REMOTE EVENT] Admin closed RFID Enrollment Mode. Restoring state..."));
+        isEnrollmentMode = false;
+        enrollmentTargetName = "";
+        audioLed.playKeypadClick();
+        changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
+    } else if (isEnrollmentMode && cloudEnrollmentActive && (cloudTargetRole != enrollmentTargetRole || cloudTargetName != enrollmentTargetName)) {
+        enrollmentTargetRole = cloudTargetRole;
+        enrollmentTargetName = cloudTargetName;
+        displayMgr.showEnrollmentScanningScreen(enrollmentTargetRole.c_str(), enrollmentTargetName.c_str());
+    }
+    // CASE A & B: Normal Session State Transitions when not in enrollment mode
+    else if (!isEnrollmentMode) {
+        // CASE A: Terminal was ACTIVE / OPEN locally, but session was TERMINATED on website!
+        if (!isTerminalLocked && cloudIsLocked) {
+            Serial.println(F("[REMOTE EVENT] Active session terminated from website! Arming hardware lock..."));
+            lastFacultyToggleTime = millis();
+            isTerminalLocked = true;
+            offlineStorage.resetSessionState();
+            audioLed.cueSessionStateChanged(false); // Auditory tone & red LED feedback
+            displayMgr.showSessionStateScreen(false, currentSectionCode.c_str());
+            stateAfterFeedback = STATE_LOCKED;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        }
+        // CASE B: Terminal was LOCKED locally, but session was STARTED on website!
+        else if (isTerminalLocked && !cloudIsLocked) {
+            Serial.println(F("[REMOTE EVENT] Session opened from website! Unlocking hardware terminal..."));
+            lastFacultyToggleTime = millis();
+            isTerminalLocked = false;
+            offlineStorage.resetSessionState();
+            currentSectionCode = cloudSection;
+            audioLed.cueSessionStateChanged(true); // Auditory chime & green LED feedback
+            displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), "Web Console");
+            stateAfterFeedback = STATE_IDLE_SCAN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        }
+    }
+}
+
+void handleNetworkResponse(const NetResponseEvent &resp) {
+    if (resp.type == NET_EVENT_KEYPAD_OTP) {
+        if (strcmp(resp.code, "ACCESS_GRANTED") == 0) {
+            audioLed.cueAccessGranted();
+            displayMgr.showAccessGranted(resp.studentName, resp.status, resp.studentId);
+            lastStudentScanTime = millis();
+            stateAfterFeedback = STATE_PACING_COOLDOWN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        } else if (strcmp(resp.code, "ALREADY_RECORDED") == 0) {
+            audioLed.cueAccessDenied();
+            displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Recorded", "Attendance Logged");
+            stateAfterFeedback = STATE_IDLE_SCAN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        } else {
+            audioLed.cueAccessDenied();
+            displayMgr.showAccessDenied("INVALID OTP", "Code Expired/Wrong", "Generate New PIN");
+            stateAfterFeedback = STATE_IDLE_SCAN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        }
+        return;
+    }
+
+    // Otherwise: NET_EVENT_RFID_TAP
+    String cardUid = String(resp.originalPayload);
 
     // If request failed due to actual network/transport failure (timeout or unreachable), fallback to offline storage
-    if (!reqSuccess || response.httpCode <= 0 || response.code == "OFFLINE" || response.code == "ERR_HTTP_FAIL") {
+    if (resp.httpCode <= 0 || strcmp(resp.code, "OFFLINE") == 0 || strcmp(resp.code, "ERR_HTTP_FAIL") == 0) {
         Serial.println(F("[OFFLINE FALLBACK] Server unreachable during tap. Saving locally..."));
         handleOfflineCardTap(cardUid);
         return;
     }
 
     Serial.printf(F("[BACKEND RESPONSE] HTTP %d | Code: %s | Message: %s\n"),
-                  response.httpCode, response.code.c_str(), response.message.c_str());
+                  resp.httpCode, resp.code, resp.message);
 
-    if (response.code == "ENROLLMENT_CAPTURED") {
+    if (strcmp(resp.code, "ENROLLMENT_CAPTURED") == 0) {
         // Tag captured live for Admin Enrollment Mode
         audioLed.cueAccessGranted(); // Positive chirp
         displayMgr.showEnrollmentCapturedScreen(
             cardUid.c_str(),
             enrollmentTargetRole.c_str(),
-            response.isRegistered,
-            response.cardHolder.c_str()
+            resp.isRegistered,
+            resp.cardHolder
         );
         stateAfterFeedback = isEnrollmentMode ? STATE_ENROLLMENT_SCAN : (isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "SESSION_STARTED") {
+    else if (strcmp(resp.code, "SESSION_STARTED") == 0) {
         // Faculty Master Badge tapped to open session
         lastFacultyToggleTime = millis();
         isTerminalLocked = false;
         offlineStorage.resetSessionState();
-        currentSectionCode = response.sectionCode;
+        currentSectionCode = String(resp.sectionCode);
         audioLed.cueSessionStateChanged(true);
-        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), response.facultyName.c_str());
+        displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), resp.facultyName);
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "SESSION_CLOSED") {
+    else if (strcmp(resp.code, "SESSION_CLOSED") == 0) {
         // Faculty Master Badge tapped to terminate session
         lastFacultyToggleTime = millis();
         isTerminalLocked = true;
@@ -672,43 +935,43 @@ void processRfidCard() {
         stateAfterFeedback = STATE_LOCKED;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "ACCESS_GRANTED") {
+    else if (strcmp(resp.code, "ACCESS_GRANTED") == 0) {
         // Valid student card scanned on time or late
         audioLed.cueAccessGranted();
-        displayMgr.showAccessGranted(response.studentName.c_str(), response.status.c_str(), response.studentId.c_str());
+        displayMgr.showAccessGranted(resp.studentName, resp.status, resp.studentId);
         lastStudentScanTime = millis();
         stateAfterFeedback = STATE_PACING_COOLDOWN; // Activate 3.0s anti-proxy interlock
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "NOT_ENROLLED") {
+    else if (strcmp(resp.code, "NOT_ENROLLED") == 0) {
         // Student not enrolled in this section
         audioLed.cueAccessDenied();
         displayMgr.showAccessDenied("NOT ENROLLED", "Not In Class", "Check Faculty");
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "UNAUTHORIZED_FACULTY" || response.code == "NOT_SESSION_OWNER") {
+    else if (strcmp(resp.code, "UNAUTHORIZED_FACULTY") == 0 || strcmp(resp.code, "NOT_SESSION_OWNER") == 0) {
         // Unauthorized faculty (not assigned to this room/terminal, or attempting to close another's session)
         audioLed.cueAccessDenied();
         displayMgr.showAccessDenied("UNAUTHORIZED", "Not Assigned", "Wrong Instructor");
         stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "ALREADY_RECORDED") {
+    else if (strcmp(resp.code, "ALREADY_RECORDED") == 0) {
         // Anti-passback violation (card already tapped for this session)
         audioLed.cueAccessDenied();
         displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Recorded", "Attendance Logged");
         stateAfterFeedback = STATE_IDLE_SCAN;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "SESSION_LOCKED") {
+    else if (strcmp(resp.code, "SESSION_LOCKED") == 0) {
         // Student card presented while terminal is locked
         audioLed.cueAccessDenied();
         displayMgr.showAccessDenied("TERMINAL LOCKED", "Tap Faculty Badge", "To Open Session");
         stateAfterFeedback = STATE_LOCKED;
         changeState(STATE_FEEDBACK_DISPLAY);
     }
-    else if (response.code == "UNREGISTERED_CARD" || response.code == "UNREGISTERED_TAG") {
+    else if (strcmp(resp.code, "UNREGISTERED_CARD") == 0 || strcmp(resp.code, "UNREGISTERED_TAG") == 0) {
         audioLed.cueAccessDenied();
         displayMgr.showCardScannedScreen(cardUid.c_str(), false);
         stateAfterFeedback = isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN;
@@ -740,9 +1003,15 @@ void handleKeypadInput() {
         if (now - lastHashPressTime <= 800 && lastHashPressTime > 0) {
             // Second '#' pressed within 800ms! Double '#' detected!
             lastHashPressTime = 0;
-            Serial.println(F("[KEYPAD] Double '#' recognized! Forcing immediate background Wi-Fi scan..."));
+            Serial.println(F("[KEYPAD] Double '#' recognized! Dispatching background Wi-Fi scan via FreeRTOS..."));
             displayMgr.showConnectingWiFi("Scanning Wi-Fi...");
-            netClient.forceReconnectNow();
+            NetRequestEvent req;
+            req.type = NET_EVENT_FORCE_RECONNECT;
+            req.payload[0] = '\0';
+            req.timestamp = millis();
+            if (netRequestQueue) {
+                xQueueSend(netRequestQueue, &req, 0);
+            }
             if (currentState == STATE_OTP_ENTRY) {
                 otpBufferLength = 0;
                 otpBuffer[0] = '\0';
@@ -798,29 +1067,25 @@ void handleKeypadInput() {
                     return;
                 }
 
-                Serial.printf(F("[KEYPAD] Submitting 6-Digit OTP: %s\n"), otpBuffer);
+                Serial.printf(F("[KEYPAD] Dispatching 6-Digit OTP via FreeRTOS: %s\n"), otpBuffer);
                 displayMgr.showProcessing("Validating OTP...");
+                stateProcessingStartTime = millis();
 
-                TerminalApiResponse response;
-                netClient.postKeypadOtp(String(otpBuffer), response);
+                NetRequestEvent req;
+                req.type = NET_EVENT_KEYPAD_OTP;
+                strncpy(req.payload, otpBuffer, sizeof(req.payload) - 1);
+                req.payload[sizeof(req.payload) - 1] = '\0';
+                req.timestamp = millis();
 
-                if (response.code == "ACCESS_GRANTED") {
-                    audioLed.cueAccessGranted();
-                    displayMgr.showAccessGranted(response.studentName.c_str(), response.status.c_str(), response.studentId.c_str());
-                    lastStudentScanTime = millis();
-                    stateAfterFeedback = STATE_PACING_COOLDOWN;
-                    changeState(STATE_FEEDBACK_DISPLAY);
-                } else if (response.code == "ALREADY_RECORDED") {
+                if (!netRequestQueue || xQueueSend(netRequestQueue, &req, 0) != pdTRUE) {
                     audioLed.cueAccessDenied();
-                    displayMgr.showAccessDenied("ANTI-PASSBACK", "Already Recorded", "Attendance Logged");
+                    displayMgr.showAccessDenied("QUEUE FULL", "Network Busy", "Try Again");
                     stateAfterFeedback = STATE_IDLE_SCAN;
                     changeState(STATE_FEEDBACK_DISPLAY);
-                } else {
-                    audioLed.cueAccessDenied();
-                    displayMgr.showAccessDenied("INVALID OTP", "Code Expired/Wrong", "Generate New PIN");
-                    stateAfterFeedback = STATE_IDLE_SCAN;
-                    changeState(STATE_FEEDBACK_DISPLAY);
+                    return;
                 }
+
+                changeState(STATE_PROCESSING);
             } else {
                 // Less than 6 digits entered
                 audioLed.cuePacingViolation();
