@@ -300,7 +300,14 @@ public:
                 strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.000Z", &timeinfo);
                 timeStr = String(buf);
             } else {
-                timeStr = String("2026-11-10T") + String(millis()) + String("Z");
+                // If SNTP has not synced yet, format a valid ISO 8601 string from elapsed uptime
+                unsigned long s = millis() / 1000;
+                unsigned int hh = (s / 3600) % 24;
+                unsigned int mm = (s / 60) % 60;
+                unsigned int ss = s % 60;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "2026-11-12T%02u:%02u:%02u.000Z", hh, mm, ss);
+                timeStr = String(buf);
             }
         }
         strncpy(rec.timestamp, timeStr.c_str(), sizeof(rec.timestamp) - 1);
