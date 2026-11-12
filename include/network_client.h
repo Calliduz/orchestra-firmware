@@ -40,6 +40,7 @@ private:
     unsigned long probeStartTime = 0;
     unsigned long scanStartTime = 0;
     unsigned long lastReconnectSweepTime = 0;
+    const unsigned long WIFI_OFFLINE_COOLDOWN_MS = 60000; // 60s quiet window (radio OFF) for pure 13.56MHz RFID sensitivity
 
     void configureChannels() {
         wifi_country_t country = {
@@ -67,6 +68,45 @@ public:
 
     bool isConnected() {
         return (WiFi.status() == WL_CONNECTED);
+    }
+
+    /**
+     * Ingress Active Hold & Instant Priority Abort:
+     * Resets the 60-second Wi-Fi reconnect timer to ensure zero RF activity while students are tapping.
+     * If an async scan or probe happens to be in flight when a card touches the antenna,
+     * immediately aborts the scan and cuts radio power in microseconds!
+     */
+    void resetCooldown(unsigned long now) {
+        lastReconnectSweepTime = now;
+        if (connState == WIFI_CONN_SCANNING) {
+            WiFi.scanDelete();
+            WiFi.mode(WIFI_OFF);
+            connState = WIFI_CONN_DISCONNECTED;
+            Serial.println(F("[WIFI INTERLOCK] Card tap detected during background scan! Aborted scan & powered OFF radio."));
+        } else if (connState == WIFI_CONN_PROBING) {
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            connState = WIFI_CONN_DISCONNECTED;
+            Serial.println(F("[WIFI INTERLOCK] Card tap detected during association probe! Aborted probe & powered OFF radio."));
+        }
+    }
+
+    /**
+     * Manual Wi-Fi Reconnect Trigger (Double-tap '#' key):
+     * Instantly initiates a background active Wi-Fi scan without waiting for the 60s timer.
+     */
+    void forceReconnectNow() {
+        if (connState == WIFI_CONN_ACTIVE) {
+            Serial.println(F("[WIFI MANUAL] Wi-Fi link already active."));
+            return;
+        }
+        Serial.println(F("[WIFI MANUAL] Double '#' pressed! Forcing immediate background Wi-Fi scan..."));
+        WiFi.scanDelete();
+        WiFi.mode(WIFI_STA);
+        WiFi.scanNetworks(true, false, false, 120); // ASYNC = true! Zero blocking!
+        connState = WIFI_CONN_SCANNING;
+        scanStartTime = millis();
+        lastReconnectSweepTime = millis();
     }
 
     /**
@@ -274,10 +314,10 @@ public:
             return;
         }
 
-        // 5. Disconnected / Cooldown Period (20 seconds)
+        // 5. Disconnected / Cooldown Period (60 seconds)
         // Radio is 100% OFF during cooldown for pure 13.56MHz RFID sensitivity
         if (connState == WIFI_CONN_DISCONNECTED) {
-            if (now - lastReconnectSweepTime >= 20000) {
+            if (now - lastReconnectSweepTime >= WIFI_OFFLINE_COOLDOWN_MS) {
                 lastReconnectSweepTime = now;
                 WiFi.mode(WIFI_STA);
                 WiFi.scanNetworks(true, false, false, 120); // ASYNC = true! Zero blocking!

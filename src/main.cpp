@@ -462,6 +462,7 @@ void handlePacingInterlock() {
 // OFFLINE CARD TAP & LOCAL SESSION TRUST HANDLER
 // =========================================================================
 void handleOfflineCardTap(const String &cardUid) {
+    netClient.resetCooldown(millis()); // Ingress Active Hold: reset 60s Wi-Fi cooldown on every tap
     Serial.printf(F("[OFFLINE TAP] Evaluating card 0x%s against local cache...\n"), cardUid.c_str());
 
     String profName, profRole;
@@ -569,6 +570,10 @@ void processRfidCard() {
 
     // Instant physical feedback (< 1ms) confirming antenna coupling
     audioLed.playKeypadClick();
+
+    // Ingress Active Hold & Instant Priority Abort:
+    // Reset 60s cooldown and immediately abort any background Wi-Fi scan in flight
+    netClient.resetCooldown(millis());
 
     String cardUid = getCardUidHex(&(mfrc522.uid));
     mfrc522.PICC_HaltA();
@@ -688,6 +693,29 @@ void handleKeypadInput() {
 
     audioLed.playKeypadClick();
     Serial.printf(F("[KEYPAD] Key pressed: '%c'\n"), key);
+
+    // Double '#' shortcut detection on Locked, Idle, or initial OTP state to force Wi-Fi reconnect sweep
+    static unsigned long lastHashPressTime = 0;
+    if (key == '#') {
+        unsigned long now = millis();
+        if (now - lastHashPressTime <= 800 && lastHashPressTime > 0) {
+            // Second '#' pressed within 800ms! Double '#' detected!
+            lastHashPressTime = 0;
+            Serial.println(F("[KEYPAD] Double '#' recognized! Forcing immediate background Wi-Fi scan..."));
+            displayMgr.showConnectingWiFi("Scanning Wi-Fi...");
+            netClient.forceReconnectNow();
+            if (currentState == STATE_OTP_ENTRY) {
+                otpBufferLength = 0;
+                otpBuffer[0] = '\0';
+                changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
+            }
+            return;
+        }
+        lastHashPressTime = now;
+    } else {
+        // Any other key resets the double '#' tracker
+        lastHashPressTime = 0;
+    }
 
     // If currently in IDLE SCAN mode and '#' is pressed, enter OTP mode
     if (currentState == STATE_IDLE_SCAN && key == '#') {
