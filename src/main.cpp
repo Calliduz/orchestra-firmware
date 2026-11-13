@@ -758,31 +758,16 @@ void processRfidCard() {
         return;
     }
 
-    // Debounce guard: require at least 1500ms between physical NFC taps to avoid jitter/double-trigger
-    static unsigned long lastNfcTapTime = 0;
-    static String lastScannedUid = "";
-    unsigned long now = millis();
-
-    String cardUid = getCardUidHex(&(mfrc522.uid));
-    mfrc522.PICC_HaltA();
-    mfrc522.PCD_StopCrypto1();
-
-    if (now - lastNfcTapTime < 1500 && cardUid == lastScannedUid) {
-        // Suppress bounce / lingering card read
-        return;
-    }
-    lastNfcTapTime = now;
-    lastScannedUid = cardUid;
-
-    // Noticeable tap acknowledgment delay (150ms steady hold) so the user feels the deliberate tap
-    delay(150);
-
-    // Instant physical feedback confirming antenna coupling
+    // Instant physical feedback (< 1ms) confirming antenna coupling
     audioLed.playKeypadClick();
 
     // Ingress Active Hold & Instant Priority Abort:
     // Reset 60s cooldown and immediately abort any background Wi-Fi scan in flight
     netClient.resetCooldown(millis());
+
+    String cardUid = getCardUidHex(&(mfrc522.uid));
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
 
     // Faculty Rapid Re-trigger & Card-Held Debounce Guard:
     // If a faculty badge was toggled within 4000ms, suppress subsequent reads of faculty cards
