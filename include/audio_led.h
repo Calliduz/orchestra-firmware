@@ -22,68 +22,66 @@ public:
     }
 
     void playKeypadClick() {
-        // Sharp high click — clearly audible keypad feedback
-        tone(BUZZER_PIN, 3800, 20);
+        // High-resonant punchy click
+        tone(BUZZER_PIN, 2700, 35);
     }
 
     void cueAccessGranted() {
-        // ✅ Double rising chirp — crisp, positive, unmistakable
-        // C7 → E7 rising pair, punchy and bright
+        // ✅ High-resonant double pulse (resonant peak around 2400-2700 Hz)
+        // Sustained duration to maximize acoustic transducer volume in classrooms
         setLeds(true, false);
-        tone(BUZZER_PIN, 2093, 90);   // C7
-        delay(100);
-        tone(BUZZER_PIN, 2637, 140);  // E7 (higher, longer = triumphant)
+        tone(BUZZER_PIN, 2400, 160);
+        delay(180);
+        tone(BUZZER_PIN, 2700, 260); // Longer resonant tone for maximum sound pressure
     }
 
     void cueAccessDenied() {
-        // ❌ Harsh descending buzz pair — clearly negative, hard to ignore
+        // ❌ Louder, longer dual warning buzz
         setLeds(false, true);
-        tone(BUZZER_PIN, 600, 150);
-        delay(160);
-        tone(BUZZER_PIN, 300, 250);   // Drop an octave — unmistakably wrong
+        tone(BUZZER_PIN, 1200, 220);
+        delay(240);
+        tone(BUZZER_PIN, 800, 340);
     }
 
     void cueSessionStateChanged(bool opened) {
         if (opened) {
-            // 🟢 Session OPEN — ascending tri-tone fanfare (E6→A6→C7→E7)
+            // 🟢 Session OPEN — Loud resonant rising flourish
             setLeds(true, false);
-            tone(BUZZER_PIN, 1318, 90);  // E6
-            delay(100);
-            tone(BUZZER_PIN, 1760, 90);  // A6
-            delay(100);
-            tone(BUZZER_PIN, 2093, 110); // C7
-            delay(120);
-            tone(BUZZER_PIN, 2637, 220); // E7 — high bright finish
+            tone(BUZZER_PIN, 1500, 140);
+            delay(150);
+            tone(BUZZER_PIN, 2000, 140);
+            delay(150);
+            tone(BUZZER_PIN, 2700, 320); // Long peak resonance
         } else {
-            // 🔴 Session CLOSE — descending resolution (A6→E6→A5)
+            // 🔴 Session CLOSE — Loud descending sequence
             setLeds(false, true);
-            tone(BUZZER_PIN, 1760, 110); // A6
-            delay(120);
-            tone(BUZZER_PIN, 1318, 110); // E6
-            delay(120);
-            tone(BUZZER_PIN, 880, 280);  // A5 — long low closure
+            tone(BUZZER_PIN, 2400, 150);
+            delay(160);
+            tone(BUZZER_PIN, 1800, 160);
+            delay(170);
+            tone(BUZZER_PIN, 1000, 350);
         }
     }
 
     void cuePacingViolation() {
-        // ⚠️ Anti-passback deterrent — sharp high-low-high stutter
+        // ⚠️ Loud anti-passback alert
         digitalWrite(LED_RED_PIN, HIGH);
-        tone(BUZZER_PIN, 3200, 60);
-        delay(70);
-        tone(BUZZER_PIN, 1600, 60);
-        delay(70);
-        tone(BUZZER_PIN, 3200, 60);
-        delay(70);
+        tone(BUZZER_PIN, 2700, 100);
+        delay(110);
+        tone(BUZZER_PIN, 2000, 100);
+        delay(110);
+        tone(BUZZER_PIN, 2700, 120);
+        delay(130);
         digitalWrite(LED_RED_PIN, LOW);
     }
 
     void cueBootSuccess() {
-        // 🚀 Startup chime — confident rising pair, both LEDs flash
-        tone(BUZZER_PIN, 1760, 90);   // A6
-        delay(100);
-        tone(BUZZER_PIN, 2637, 150);  // E7
+        // 🚀 Startup chime
+        tone(BUZZER_PIN, 2000, 140);
+        delay(150);
+        tone(BUZZER_PIN, 2700, 240);
         setLeds(true, true);
-        delay(200);
+        delay(250);
         setLeds(false, false);
     }
 };
