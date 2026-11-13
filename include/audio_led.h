@@ -4,6 +4,10 @@
 #include <Arduino.h>
 #include "config.h"
 
+#define BUZZER_PWM_CHANNEL    0
+#define BUZZER_PWM_RES        8     // 8-bit resolution (0..255)
+#define BUZZER_DUTY_50        128   // 50% square wave duty cycle for maximum mechanical displacement
+
 class AudioLedManager {
 public:
     void begin() {
@@ -14,6 +18,10 @@ public:
         digitalWrite(LED_GREEN_PIN, LOW);
         digitalWrite(LED_RED_PIN, LOW);
         digitalWrite(BUZZER_PIN, LOW);
+
+        // Arduino ESP32 v3.x uses ledcAttach(pin, freq, resolution)
+        ledcAttach(BUZZER_PIN, 2730, BUZZER_PWM_RES);
+        silence();
     }
 
     void setLeds(bool green, bool red) {
@@ -21,65 +29,82 @@ public:
         digitalWrite(LED_RED_PIN, red ? HIGH : LOW);
     }
 
+    /**
+     * Hardware-level LEDC PWM driver:
+     * - Reconfigures the carrier frequency dynamically to the buzzer's acoustic sweet spot
+     * - Writes an exact 50% duty cycle (128 / 255) to drive the diaphragm at peak amplitude
+     */
+    void sound(uint32_t freqHz, uint32_t durationMs) {
+        if (freqHz > 0) {
+            ledcWriteTone(BUZZER_PIN, freqHz);
+        } else {
+            silence();
+        }
+        delay(durationMs);
+        silence();
+    }
+
+    void silence() {
+        ledcWrite(BUZZER_PIN, 0);
+    }
+
     void playKeypadClick() {
-        // High-resonant punchy click
-        tone(BUZZER_PIN, 2700, 35);
+        // High-amplitude resonant click at 2730 Hz
+        sound(2730, 45);
     }
 
     void cueAccessGranted() {
-        // ✅ High-resonant double pulse (resonant peak around 2400-2700 Hz)
-        // Sustained duration to maximize acoustic transducer volume in classrooms
+        // ✅ Maximum Volume Affirmative Double-Chirp (2400 Hz → 2730 Hz resonant peak)
         setLeds(true, false);
-        tone(BUZZER_PIN, 2400, 160);
-        delay(180);
-        tone(BUZZER_PIN, 2700, 260); // Longer resonant tone for maximum sound pressure
+        sound(2400, 150);
+        delay(70);
+        sound(2730, 260);
     }
 
     void cueAccessDenied() {
-        // ❌ Louder, longer dual warning buzz
+        // ❌ High-volume descending harsh double-buzz
         setLeds(false, true);
-        tone(BUZZER_PIN, 1200, 220);
-        delay(240);
-        tone(BUZZER_PIN, 800, 340);
+        sound(1500, 200);
+        delay(80);
+        sound(1000, 320);
     }
 
     void cueSessionStateChanged(bool opened) {
         if (opened) {
-            // 🟢 Session OPEN — Loud resonant rising flourish
+            // 🟢 Session OPEN — Loud resonant fanfare
             setLeds(true, false);
-            tone(BUZZER_PIN, 1500, 140);
-            delay(150);
-            tone(BUZZER_PIN, 2000, 140);
-            delay(150);
-            tone(BUZZER_PIN, 2700, 320); // Long peak resonance
+            sound(1800, 120);
+            delay(60);
+            sound(2200, 140);
+            delay(60);
+            sound(2730, 300);
         } else {
-            // 🔴 Session CLOSE — Loud descending sequence
+            // 🔴 Session CLOSE — Loud descending warning
             setLeds(false, true);
-            tone(BUZZER_PIN, 2400, 150);
-            delay(160);
-            tone(BUZZER_PIN, 1800, 160);
-            delay(170);
-            tone(BUZZER_PIN, 1000, 350);
+            sound(2730, 140);
+            delay(60);
+            sound(2000, 160);
+            delay(60);
+            sound(1200, 350);
         }
     }
 
     void cuePacingViolation() {
-        // ⚠️ Loud anti-passback alert
+        // ⚠️ Loud rapid anti-passback stutter
         digitalWrite(LED_RED_PIN, HIGH);
-        tone(BUZZER_PIN, 2700, 100);
-        delay(110);
-        tone(BUZZER_PIN, 2000, 100);
-        delay(110);
-        tone(BUZZER_PIN, 2700, 120);
-        delay(130);
+        sound(2730, 90);
+        delay(50);
+        sound(2200, 90);
+        delay(50);
+        sound(2730, 110);
         digitalWrite(LED_RED_PIN, LOW);
     }
 
     void cueBootSuccess() {
         // 🚀 Startup chime
-        tone(BUZZER_PIN, 2000, 140);
-        delay(150);
-        tone(BUZZER_PIN, 2700, 240);
+        sound(2200, 120);
+        delay(60);
+        sound(2730, 220);
         setLeds(true, true);
         delay(250);
         setLeds(false, false);
