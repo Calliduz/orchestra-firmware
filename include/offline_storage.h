@@ -32,9 +32,9 @@ struct StudentCacheRecord {
  * Structure representing an offline attendance log recorded during Wi-Fi outage
  */
 struct OfflineAttendanceRecord {
-    char rfidUid[16];
-    char timestamp[28];
-    char authMethod[16];
+    char rfidUid[24];
+    char timestamp[32];
+    char authMethod[20];
 };
 
 class OfflineStorageManager {
@@ -266,9 +266,12 @@ public:
             String mth = prefLogs.getString(kM, "RFID_TAP");
 
             if (uid.length() > 0) {
-                strncpy(rec.rfidUid, uid.c_str(), sizeof(rec.rfidUid));
-                strncpy(rec.timestamp, ts.c_str(), sizeof(rec.timestamp));
-                strncpy(rec.authMethod, mth.c_str(), sizeof(rec.authMethod));
+                strncpy(rec.rfidUid, uid.c_str(), sizeof(rec.rfidUid) - 1);
+                rec.rfidUid[sizeof(rec.rfidUid) - 1] = '\0';
+                strncpy(rec.timestamp, ts.c_str(), sizeof(rec.timestamp) - 1);
+                rec.timestamp[sizeof(rec.timestamp) - 1] = '\0';
+                strncpy(rec.authMethod, mth.c_str(), sizeof(rec.authMethod) - 1);
+                rec.authMethod[sizeof(rec.authMethod) - 1] = '\0';
                 pendingLogs.push_back(rec);
             }
         }

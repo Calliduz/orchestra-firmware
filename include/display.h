@@ -365,8 +365,8 @@ public:
 
         drawHeader(isRegistered ? "[ TAG RE-MAPPED ]" : "[ BADGE CAPTURED ]");
 
-        char uidBuf[24];
-        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
+        char uidBuf[32];
+        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid ? cardUid : "UNKNOWN");
         printCentered(uidBuf, 16, 1, SSD1306_WHITE, 20);
 
         if (isRegistered && cardHolder && strlen(cardHolder) > 0) {
@@ -390,8 +390,8 @@ public:
         display.clearDisplay();
         drawHeader(isRegistered ? "[ TAG RECOGNIZED ]" : "[ RFID INTERCEPT ]");
 
-        char uidBuf[24];
-        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
+        char uidBuf[32];
+        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid ? cardUid : "UNKNOWN");
         printCentered(uidBuf, 20, 1, SSD1306_WHITE, 20);
 
         display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
@@ -458,8 +458,8 @@ public:
         display.clearDisplay();
         drawHeader("[ OFFLINE SAVED ]");
 
-        char uidBuf[24];
-        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid);
+        char uidBuf[32];
+        snprintf(uidBuf, sizeof(uidBuf), "UID: 0x%s", cardUid ? cardUid : "UNKNOWN");
         printCentered(uidBuf, 17, 1, SSD1306_WHITE, 20);
 
         printCentered("Buffered In NVS", 29, 1, SSD1306_WHITE, 20);

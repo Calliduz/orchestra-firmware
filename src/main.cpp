@@ -155,6 +155,7 @@ QueueHandle_t cloudStatusQueue = NULL;
 TaskHandle_t networkTaskHandle = NULL;
 
 String currentPendingUid = "";
+NetEventType currentPendingRequestType = NET_EVENT_NONE;
 unsigned long stateProcessingStartTime = 0;
 
 // Forward Declarations
@@ -632,13 +633,22 @@ void loop() {
             unsigned long elapsed = now - sectionSelectionStartTime;
             if (elapsed >= SECTION_SELECTION_TIMEOUT_MS) {
                 Serial.println(F("[DISAMBIGUATION] Selection timed out. Auto-selecting earliest section (1)..."));
+                if (netResponseQueue) {
+                    xQueueReset(netResponseQueue);
+                }
                 NetRequestEvent req;
                 req.type = NET_EVENT_SELECT_SECTION;
                 snprintf(req.payload, sizeof(req.payload), "1,%s", disambiguationFacultyUid);
                 req.timestamp = millis();
-                if (netRequestQueue) {
-                    xQueueSend(netRequestQueue, &req, 0);
+                if (!netRequestQueue || xQueueSend(netRequestQueue, &req, 0) != pdTRUE) {
+                    audioLed.cueAccessDenied();
+                    displayMgr.showAccessDenied("QUEUE FULL", "Network Busy", "Tap Badge Again");
+                    stateAfterFeedback = STATE_LOCKED;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                    break;
                 }
+                currentPendingUid = "";
+                currentPendingRequestType = NET_EVENT_SELECT_SECTION;
                 displayMgr.showProcessing("Activating Class...");
                 stateProcessingStartTime = millis();
                 changeState(STATE_PROCESSING);
@@ -657,10 +667,35 @@ void loop() {
         case STATE_PROCESSING: {
             NetResponseEvent resp;
             if (netResponseQueue && xQueueReceive(netResponseQueue, &resp, 0) == pdTRUE) {
-                handleNetworkResponse(resp);
+                if (currentPendingRequestType == NET_EVENT_NONE || resp.type == currentPendingRequestType) {
+                    currentPendingRequestType = NET_EVENT_NONE;
+                    currentPendingUid = "";
+                    handleNetworkResponse(resp);
+                } else {
+                    Serial.printf(F("[DISCARD] Mismatched response received: got %d, expected %d. Dropping stale response.\n"),
+                                  resp.type, currentPendingRequestType);
+                }
             } else if (millis() - stateProcessingStartTime >= 4000) {
-                Serial.println(F("[TIMEOUT] Network worker timeout! Fallback to offline storage."));
-                handleOfflineCardTap(currentPendingUid);
+                if (currentPendingRequestType == NET_EVENT_RFID_TAP) {
+                    Serial.println(F("[TIMEOUT] Network worker timeout! Fallback to offline storage."));
+                    handleOfflineCardTap(currentPendingUid);
+                } else if (currentPendingRequestType == NET_EVENT_KEYPAD_OTP) {
+                    Serial.println(F("[TIMEOUT] Network worker timeout for OTP! Showing error."));
+                    audioLed.cueAccessDenied();
+                    displayMgr.showAccessDenied("TIMEOUT", "Network Busy", "Try Again");
+                    stateAfterFeedback = STATE_IDLE_SCAN;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                } else if (currentPendingRequestType == NET_EVENT_SELECT_SECTION) {
+                    Serial.println(F("[TIMEOUT] Network worker timeout for section selection! Reverting to LOCKED."));
+                    audioLed.cueAccessDenied();
+                    displayMgr.showAccessDenied("TIMEOUT", "Failed To Select", "Tap Badge Again");
+                    stateAfterFeedback = STATE_LOCKED;
+                    changeState(STATE_FEEDBACK_DISPLAY);
+                } else {
+                    changeState(isTerminalLocked ? STATE_LOCKED : STATE_IDLE_SCAN);
+                }
+                currentPendingRequestType = NET_EVENT_NONE;
+                currentPendingUid = "";
             }
             break;
         }
@@ -936,6 +971,9 @@ void processRfidCard() {
     }
 
     // ONLINE: Dispatch via FreeRTOS queue to Core 0 NetworkWorkerTask (Zero loop blocking!)
+    if (netResponseQueue) {
+        xQueueReset(netResponseQueue);
+    }
     displayMgr.showProcessing("Validating Tag...");
     currentPendingUid = cardUid;
     stateProcessingStartTime = millis();
@@ -948,10 +986,13 @@ void processRfidCard() {
 
     if (!netRequestQueue || xQueueSend(netRequestQueue, &req, 0) != pdTRUE) {
         Serial.println(F("[QUEUE FULL] Network request queue full! Fallback to offline storage."));
+        currentPendingRequestType = NET_EVENT_NONE;
+        currentPendingUid = "";
         handleOfflineCardTap(cardUid);
         return;
     }
 
+    currentPendingRequestType = NET_EVENT_RFID_TAP;
     changeState(STATE_PROCESSING);
 }
 
@@ -1243,13 +1284,22 @@ void handleKeypadInput() {
         if (key >= '1' && key <= ('0' + disambiguationCount)) {
             int selectedIndex = key - '0';
             Serial.printf(F("[KEYPAD] Section %d selected from OLED menu\n"), selectedIndex);
+            if (netResponseQueue) {
+                xQueueReset(netResponseQueue);
+            }
             NetRequestEvent req;
             req.type = NET_EVENT_SELECT_SECTION;
             snprintf(req.payload, sizeof(req.payload), "%d,%s", selectedIndex, disambiguationFacultyUid);
             req.timestamp = millis();
-            if (netRequestQueue) {
-                xQueueSend(netRequestQueue, &req, 0);
+            if (!netRequestQueue || xQueueSend(netRequestQueue, &req, 0) != pdTRUE) {
+                audioLed.cueAccessDenied();
+                displayMgr.showAccessDenied("QUEUE FULL", "Network Busy", "Tap Badge Again");
+                stateAfterFeedback = STATE_LOCKED;
+                changeState(STATE_FEEDBACK_DISPLAY);
+                return;
             }
+            currentPendingUid = "";
+            currentPendingRequestType = NET_EVENT_SELECT_SECTION;
             displayMgr.showProcessing("Activating Class...");
             stateProcessingStartTime = millis();
             changeState(STATE_PROCESSING);
@@ -1304,6 +1354,9 @@ void handleKeypadInput() {
                 }
 
                 Serial.printf(F("[KEYPAD] Dispatching 6-Digit OTP via FreeRTOS: %s\n"), otpBuffer);
+                if (netResponseQueue) {
+                    xQueueReset(netResponseQueue);
+                }
                 displayMgr.showProcessing("Validating OTP...");
                 stateProcessingStartTime = millis();
 
@@ -1321,6 +1374,8 @@ void handleKeypadInput() {
                     return;
                 }
 
+                currentPendingUid = "";
+                currentPendingRequestType = NET_EVENT_KEYPAD_OTP;
                 changeState(STATE_PROCESSING);
             } else {
                 // Less than 6 digits entered
@@ -1344,8 +1399,11 @@ void handleKeypadInput() {
 // HELPER: Convert MFRC522 UID Bytes to Hexadecimal String
 // =========================================================================
 String getCardUidHex(MFRC522::Uid *uid) {
+    if (!uid) return "";
     String hexStr = "";
-    for (byte i = 0; i < uid->size; i++) {
+    byte len = uid->size;
+    if (len > 10) len = 10;
+    for (byte i = 0; i < len; i++) {
         if (uid->uidByte[i] < 0x10) {
             hexStr += "0";
         }
