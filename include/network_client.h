@@ -25,6 +25,9 @@ struct TerminalApiResponse {
     String facultyName;
     bool isRegistered;
     String cardHolder;
+    String facultyUid;
+    int sectionCount;
+    char sectionCodes[4][24];
 };
 
 class OrchestraNetworkClient {
@@ -449,6 +452,68 @@ public:
                 outResponse.facultyName = resDoc["data"]["facultyName"] | "";
                 outResponse.isRegistered = resDoc["data"]["isRegistered"] | false;
                 outResponse.cardHolder = resDoc["data"]["cardHolderName"] | "";
+                outResponse.facultyUid = resDoc["data"]["facultyUid"] | "";
+
+                outResponse.sectionCount = 0;
+                if (resDoc["data"]["sections"].is<JsonArray>()) {
+                    JsonArray secArr = resDoc["data"]["sections"].as<JsonArray>();
+                    for (JsonObject s : secArr) {
+                        if (outResponse.sectionCount < 4) {
+                            const char* sCode = s["sectionCode"] | "";
+                            strncpy(outResponse.sectionCodes[outResponse.sectionCount], sCode, sizeof(outResponse.sectionCodes[0]) - 1);
+                            outResponse.sectionCodes[outResponse.sectionCount][sizeof(outResponse.sectionCodes[0]) - 1] = '\0';
+                            outResponse.sectionCount++;
+                        }
+                    }
+                }
+            }
+        } else {
+            outResponse.code = "ERR_HTTP_FAIL";
+            outResponse.message = http.errorToString(httpCode);
+        }
+
+        http.end();
+        return (httpCode > 0);
+    }
+
+    bool postSelectSection(int index, const String &facultyUid, TerminalApiResponse &outResponse) {
+        if (!isConnected()) {
+            outResponse.httpCode = 0;
+            outResponse.code = "OFFLINE";
+            outResponse.message = "No Wi-Fi Link";
+            return false;
+        }
+
+        HTTPClient http;
+        String url = String(BACKEND_BASE_URL) + "/hardware/select-section";
+        http.begin(url);
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("x-api-key", HARDWARE_API_KEY);
+        http.setTimeout(2500);
+
+        JsonDocument reqDoc;
+        reqDoc["terminalId"] = TERMINAL_ID;
+        reqDoc["index"] = index;
+        if (facultyUid.length() > 0) {
+            reqDoc["facultyUid"] = facultyUid;
+        }
+
+        String reqJson;
+        serializeJson(reqDoc, reqJson);
+
+        int httpCode = http.POST(reqJson);
+        outResponse.httpCode = httpCode;
+
+        if (httpCode > 0) {
+            String resJson = http.getString();
+            JsonDocument resDoc;
+            DeserializationError err = deserializeJson(resDoc, resJson);
+
+            if (!err) {
+                outResponse.code = resDoc["code"] | "UNKNOWN";
+                outResponse.message = resDoc["message"] | "";
+                outResponse.sectionCode = resDoc["data"]["sectionCode"] | DEFAULT_SECTION;
+                outResponse.facultyName = resDoc["data"]["facultyName"] | "";
             }
         } else {
             outResponse.code = "ERR_HTTP_FAIL";

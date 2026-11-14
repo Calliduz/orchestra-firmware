@@ -67,6 +67,7 @@ enum TerminalState {
     STATE_IDLE_SCAN,          // Session open, ready to interrogate student credentials
     STATE_PACING_COOLDOWN,    // Non-blocking 3.0s anti-proxy interlock
     STATE_OTP_ENTRY,          // Keypad 6-digit numeric PIN entry mode
+    STATE_SECTION_SELECTION,  // Hardware keypad prompt when multiple course sections match terminal
     STATE_ENROLLMENT_SCAN,    // Live admin RFID enrollment mode for new student or faculty
     STATE_PROCESSING,         // Sending REST packet to backend
     STATE_FEEDBACK_DISPLAY    // Temporary result splash before state restoration
@@ -90,6 +91,13 @@ unsigned long otpEntryStartTime = 0;
 unsigned long lastFacultyToggleTime = 0;
 const unsigned long FACULTY_TOGGLE_COOLDOWN_MS = 4000;
 
+// Section Disambiguation Selection State
+unsigned long sectionSelectionStartTime = 0;
+const unsigned long SECTION_SELECTION_TIMEOUT_MS = 15000;
+int disambiguationCount = 0;
+char disambiguationSections[4][24] = {0};
+char disambiguationFacultyUid[32] = {0};
+
 // Keypad OTP Buffer
 char otpBuffer[7] = {0};
 int otpBufferLength = 0;
@@ -99,12 +107,13 @@ enum NetEventType {
     NET_EVENT_NONE = 0,
     NET_EVENT_RFID_TAP,
     NET_EVENT_KEYPAD_OTP,
+    NET_EVENT_SELECT_SECTION,
     NET_EVENT_FORCE_RECONNECT
 };
 
 struct NetRequestEvent {
     NetEventType type;
-    char payload[32];
+    char payload[64];
     unsigned long timestamp;
 };
 
@@ -120,7 +129,10 @@ struct NetResponseEvent {
     char facultyName[48];
     bool isRegistered;
     char cardHolder[48];
-    char originalPayload[32];
+    char originalPayload[64];
+    char facultyUid[32];
+    int sectionCount;
+    char sectionCodes[4][24];
 };
 
 struct CloudStatusMessage {
@@ -180,6 +192,15 @@ void copyApiToNetResponse(const TerminalApiResponse &api, const char* originalPa
 
     strncpy(out.cardHolder, api.cardHolder.c_str(), sizeof(out.cardHolder) - 1);
     out.cardHolder[sizeof(out.cardHolder) - 1] = '\0';
+
+    strncpy(out.facultyUid, api.facultyUid.c_str(), sizeof(out.facultyUid) - 1);
+    out.facultyUid[sizeof(out.facultyUid) - 1] = '\0';
+
+    out.sectionCount = api.sectionCount;
+    for (int i = 0; i < api.sectionCount && i < 4; i++) {
+        strncpy(out.sectionCodes[i], api.sectionCodes[i], sizeof(out.sectionCodes[0]) - 1);
+        out.sectionCodes[i][sizeof(out.sectionCodes[0]) - 1] = '\0';
+    }
 
     if (originalPayload != NULL) {
         strncpy(out.originalPayload, originalPayload, sizeof(out.originalPayload) - 1);
@@ -243,6 +264,20 @@ void networkWorkerTask(void *pvParameters) {
                 NetResponseEvent resp;
                 copyApiToNetResponse(apiResp, req.payload, resp);
                 resp.type = NET_EVENT_KEYPAD_OTP;
+                if (netResponseQueue) {
+                    xQueueSend(netResponseQueue, &resp, pdMS_TO_TICKS(200));
+                }
+            } else if (req.type == NET_EVENT_SELECT_SECTION) {
+                int secIndex = 1;
+                char facUid[32] = {0};
+                sscanf(req.payload, "%d,%31s", &secIndex, facUid);
+                Serial.printf(F("[TASK Core 0] Servicing Select Section: index %d, faculty %s\n"), secIndex, facUid);
+                TerminalApiResponse apiResp;
+                netClient.postSelectSection(secIndex, String(facUid), apiResp);
+
+                NetResponseEvent resp;
+                copyApiToNetResponse(apiResp, req.payload, resp);
+                resp.type = NET_EVENT_SELECT_SECTION;
                 if (netResponseQueue) {
                     xQueueSend(netResponseQueue, &resp, pdMS_TO_TICKS(200));
                 }
@@ -520,6 +555,32 @@ void loop() {
             break;
         }
 
+        case STATE_SECTION_SELECTION: {
+            unsigned long elapsed = now - sectionSelectionStartTime;
+            if (elapsed >= SECTION_SELECTION_TIMEOUT_MS) {
+                Serial.println(F("[DISAMBIGUATION] Selection timed out. Auto-selecting earliest section (1)..."));
+                NetRequestEvent req;
+                req.type = NET_EVENT_SELECT_SECTION;
+                snprintf(req.payload, sizeof(req.payload), "1,%s", disambiguationFacultyUid);
+                req.timestamp = millis();
+                if (netRequestQueue) {
+                    xQueueSend(netRequestQueue, &req, 0);
+                }
+                displayMgr.showProcessing("Activating Class...");
+                stateProcessingStartTime = millis();
+                changeState(STATE_PROCESSING);
+                break;
+            }
+            static unsigned long lastSecTick = 0;
+            if (now - lastSecTick >= 500) {
+                lastSecTick = now;
+                unsigned long remainingSecs = (SECTION_SELECTION_TIMEOUT_MS - elapsed) / 1000;
+                displayMgr.showSectionSelectionScreen(disambiguationSections, disambiguationCount, remainingSecs);
+            }
+            handleKeypadInput();
+            break;
+        }
+
         case STATE_PROCESSING: {
             NetResponseEvent resp;
             if (netResponseQueue && xQueueReceive(netResponseQueue, &resp, 0) == pdTRUE) {
@@ -584,6 +645,12 @@ void changeState(TerminalState newState) {
             audioLed.playKeypadClick();
             displayMgr.showKeypadOtpScreen(otpBuffer, otpBufferLength, KEYPAD_OTP_TIMEOUT_MS / 1000);
             Serial.println(F("[FSM] State -> STATE_OTP_ENTRY (Keypad 6-Digit Ingress Mode)"));
+            break;
+
+        case STATE_SECTION_SELECTION:
+            sectionSelectionStartTime = millis();
+            displayMgr.showSectionSelectionScreen(disambiguationSections, disambiguationCount, SECTION_SELECTION_TIMEOUT_MS / 1000);
+            Serial.printf(F("[FSM] State -> STATE_SECTION_SELECTION (%d sections to select)\n"), disambiguationCount);
             break;
 
         case STATE_ENROLLMENT_SCAN:
@@ -889,6 +956,27 @@ void handleNetworkResponse(const NetResponseEvent &resp) {
         return;
     }
 
+    if (resp.type == NET_EVENT_SELECT_SECTION) {
+        Serial.printf(F("[SELECT SECTION RESPONSE] HTTP %d | Code: %s | Section: %s\n"),
+                      resp.httpCode, resp.code, resp.sectionCode);
+        if (strcmp(resp.code, "SESSION_STARTED") == 0) {
+            lastFacultyToggleTime = millis();
+            isTerminalLocked = false;
+            offlineStorage.resetSessionState();
+            currentSectionCode = String(resp.sectionCode);
+            audioLed.cueSessionStateChanged(true);
+            displayMgr.showSessionStateScreen(true, currentSectionCode.c_str(), resp.facultyName);
+            stateAfterFeedback = STATE_IDLE_SCAN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        } else {
+            audioLed.cueAccessDenied();
+            displayMgr.showAccessDenied("SELECT FAILED", resp.message[0] ? resp.message : "Section Error", "Tap Badge Again");
+            stateAfterFeedback = STATE_LOCKED;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        }
+        return;
+    }
+
     // Otherwise: NET_EVENT_RFID_TAP
     String cardUid = String(resp.originalPayload);
 
@@ -902,7 +990,19 @@ void handleNetworkResponse(const NetResponseEvent &resp) {
     Serial.printf(F("[BACKEND RESPONSE] HTTP %d | Code: %s | Message: %s\n"),
                   resp.httpCode, resp.code, resp.message);
 
-    if (strcmp(resp.code, "ENROLLMENT_CAPTURED") == 0) {
+    if (strcmp(resp.code, "SECTION_DISAMBIGUATION_REQUIRED") == 0) {
+        disambiguationCount = resp.sectionCount;
+        for (int i = 0; i < disambiguationCount && i < 4; i++) {
+            strncpy(disambiguationSections[i], resp.sectionCodes[i], sizeof(disambiguationSections[0]) - 1);
+            disambiguationSections[i][sizeof(disambiguationSections[0]) - 1] = '\0';
+        }
+        strncpy(disambiguationFacultyUid, resp.facultyUid, sizeof(disambiguationFacultyUid) - 1);
+        disambiguationFacultyUid[sizeof(disambiguationFacultyUid) - 1] = '\0';
+        sectionSelectionStartTime = millis();
+        audioLed.cueAccessGranted();
+        changeState(STATE_SECTION_SELECTION);
+    }
+    else if (strcmp(resp.code, "ENROLLMENT_CAPTURED") == 0) {
         // Tag captured live for Admin Enrollment Mode
         audioLed.cueAccessGranted(); // Positive chirp
         displayMgr.showEnrollmentCapturedScreen(
@@ -1023,6 +1123,29 @@ void handleKeypadInput() {
     } else {
         // Any other key resets the double '#' tracker
         lastHashPressTime = 0;
+    }
+
+    // If in SECTION DISAMBIGUATION mode, process numeric choices 1..count
+    if (currentState == STATE_SECTION_SELECTION) {
+        if (key >= '1' && key <= ('0' + disambiguationCount)) {
+            int selectedIndex = key - '0';
+            Serial.printf(F("[KEYPAD] Section %d selected from OLED menu\n"), selectedIndex);
+            NetRequestEvent req;
+            req.type = NET_EVENT_SELECT_SECTION;
+            snprintf(req.payload, sizeof(req.payload), "%d,%s", selectedIndex, disambiguationFacultyUid);
+            req.timestamp = millis();
+            if (netRequestQueue) {
+                xQueueSend(netRequestQueue, &req, 0);
+            }
+            displayMgr.showProcessing("Activating Class...");
+            stateProcessingStartTime = millis();
+            changeState(STATE_PROCESSING);
+        } else if (key == '*' || key == 'C') {
+            audioLed.cueAccessDenied();
+            Serial.println(F("[KEYPAD] Section selection aborted. Reverting to LOCKED."));
+            changeState(STATE_LOCKED);
+        }
+        return;
     }
 
     // If currently in IDLE SCAN mode and '#' is pressed, enter OTP mode

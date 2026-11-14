@@ -478,6 +478,32 @@ public:
     }
 
     /**
+     * Section Disambiguation Selection Screen
+     * Prompts instructor to choose which section to open using the 4x4 keypad (1-4)
+     */
+    void showSectionSelectionScreen(const char sectionList[][24], int count, unsigned long remainingSecs) {
+        display.clearDisplay();
+        drawHeader("SELECT SECTION");
+
+        int maxShow = (count > 3) ? 3 : count;
+        for (int i = 0; i < maxShow; i++) {
+            char lineBuf[26];
+            snprintf(lineBuf, sizeof(lineBuf), "%d: %.16s", i + 1, sectionList[i]);
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(6, 15 + (i * 10));
+            display.print(lineBuf);
+        }
+
+        display.drawLine(0, 47, SCREEN_WIDTH, 47, SSD1306_WHITE);
+        char footBuf[26];
+        snprintf(footBuf, sizeof(footBuf), "Key 1-%d (%lus)", count, remainingSecs);
+        printCentered(footBuf, 51, 1, SSD1306_WHITE, 20);
+
+        display.display();
+    }
+
+    /**
      * Validating / Authenticating In-Progress Screen
      */
     void showProcessing(const char* message) {
