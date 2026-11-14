@@ -7,6 +7,8 @@
 #include <ArduinoJson.h>
 #include <vector>
 #include <algorithm>
+#include <ESPmDNS.h>
+#include <Preferences.h>
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -33,6 +35,12 @@ struct TerminalApiResponse {
 class OrchestraNetworkClient {
 private:
     SemaphoreHandle_t netMutex = NULL;
+    String customSsid;
+    String customPass;
+    String customBackendUrl;
+    String lastResolvedBackendUrl;
+    unsigned long lastMdnsResolveTime = 0;
+    bool mdnsStarted = false;
 
     void ensureNetMutex() {
         if (netMutex == NULL) {
@@ -96,9 +104,98 @@ public:
         WiFi.setTxPower(WIFI_POWER_15dBm);
         WiFi.setAutoReconnect(false);               // Controlled non-blockingly by firmware state machine
         configureChannels();
+
+        // Load custom provisioned credentials from NVS if available
+        Preferences pref;
+        pref.begin("net_cfg", true);
+        customSsid = pref.getString("ssid", "");
+        customPass = pref.getString("pass", "");
+        customBackendUrl = pref.getString("backend_url", "");
+        pref.end();
+
+        if (customSsid.length() > 0) {
+            Serial.printf("[WIFI NVS] Loaded provisioned AP: %s (Backend: %s)\n",
+                          customSsid.c_str(),
+                          customBackendUrl.length() > 0 ? customBackendUrl.c_str() : BACKEND_BASE_URL);
+        }
+
         for (size_t i = 0; i < WIFI_NETWORK_COUNT; i++) {
             Serial.printf("[WIFI] Registered AP [%u]: %s\n", (unsigned)(i + 1), WIFI_NETWORKS[i].ssid);
         }
+    }
+
+    String getBackendUrl() const {
+        String base = (customBackendUrl.length() > 0) ? customBackendUrl : String(BACKEND_BASE_URL);
+        base.trim();
+        if (!base.startsWith("http://") && !base.startsWith("https://")) {
+            base = "http://" + base;
+        }
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        if (!base.endsWith("/api/v1")) {
+            base += "/api/v1";
+        }
+        return base;
+    }
+
+    void setupMdns() {
+        if (!mdnsStarted) {
+            String host = "orchestra-" + String(TERMINAL_ID);
+            host.toLowerCase();
+            if (MDNS.begin(host.c_str())) {
+                MDNS.addService("http", "tcp", 80);
+                mdnsStarted = true;
+                Serial.printf(F("[mDNS] Responder started: http://%s.local\n"), host.c_str());
+            }
+        }
+    }
+
+    String resolveBackendUrl(const String &baseUrl) {
+        if (baseUrl.indexOf(".local") == -1) {
+            return baseUrl;
+        }
+
+        unsigned long now = millis();
+        if (lastResolvedBackendUrl.length() > 0 && (now - lastMdnsResolveTime < 60000)) {
+            return lastResolvedBackendUrl;
+        }
+
+        int protoIdx = baseUrl.indexOf("://");
+        int hostStart = (protoIdx != -1) ? protoIdx + 3 : 0;
+        int hostEnd = baseUrl.indexOf(':', hostStart);
+        if (hostEnd == -1) {
+            hostEnd = baseUrl.indexOf('/', hostStart);
+        }
+        if (hostEnd == -1) {
+            hostEnd = baseUrl.length();
+        }
+
+        String host = baseUrl.substring(hostStart, hostEnd);
+        String mdnsName = host;
+        if (mdnsName.endsWith(".local")) {
+            mdnsName = mdnsName.substring(0, mdnsName.length() - 6);
+        }
+
+        Serial.printf(F("[mDNS] Resolving '%s' via mDNS query...\n"), mdnsName.c_str());
+        if (!mdnsStarted) {
+            setupMdns();
+        }
+
+        // Apply resolution cooldown timer on both success and failure to prevent repeated 1500ms stalls
+        lastMdnsResolveTime = now;
+        IPAddress resolvedIp = MDNS.queryHost(mdnsName.c_str(), 1500);
+
+        if (resolvedIp != INADDR_NONE && resolvedIp.toString() != "0.0.0.0") {
+            Serial.printf(F("[mDNS] Resolved %s -> %s\n"), host.c_str(), resolvedIp.toString().c_str());
+            String newUrl = baseUrl;
+            newUrl.replace(host, resolvedIp.toString());
+            lastResolvedBackendUrl = newUrl;
+            return newUrl;
+        }
+
+        Serial.printf(F("[mDNS] Query for '%s' returned fallback.\n"), host.c_str());
+        return baseUrl;
     }
 
     bool isConnected() {
@@ -154,8 +251,6 @@ public:
      * 4. If no configured AP is nearby, exits immediately into OFFLINE STANDBY in ~1.5s without freezing boot!
      */
     bool quickBootConnect(uint32_t maxConnectWaitMs = 4500) {
-        if (WIFI_NETWORK_COUNT == 0) return false;
-
         WiFi.persistent(false);
         WiFi.mode(WIFI_STA);
         WiFi.disconnect(true);
@@ -170,6 +265,7 @@ public:
         int bestMatchIndex = -1;
         int bestScannedIndex = -1;
         int32_t bestRssi = -999;
+        bool customMatched = false;
 
         if (numNetworks > 0) {
             Serial.printf("[WIFI BOOT] Visible 2.4GHz networks found: %d\n", numNetworks);
@@ -177,12 +273,24 @@ public:
                 String s = WiFi.SSID(i);
                 int32_t r = WiFi.RSSI(i);
                 Serial.printf("  -> [%d] SSID: '%s', RSSI: %ld dBm, Ch: %d\n", i, s.c_str(), (long)r, (int)WiFi.channel(i));
+
+                // Check provisioned NVS AP first
+                if (customSsid.length() > 0 && s.equals(customSsid)) {
+                    if (r > bestRssi) {
+                        bestRssi = r;
+                        bestScannedIndex = i;
+                        customMatched = true;
+                    }
+                }
+
+                // Check built-in configured APs
                 for (size_t j = 0; j < WIFI_NETWORK_COUNT; j++) {
                     if (s.equals(WIFI_NETWORKS[j].ssid)) {
                         if (r > bestRssi) {
                             bestRssi = r;
                             bestMatchIndex = (int)j;
                             bestScannedIndex = i;
+                            customMatched = false;
                         }
                     }
                 }
@@ -196,18 +304,30 @@ public:
         uint8_t targetChannel = 0;
         const uint8_t* targetBssid = nullptr;
 
-        if (bestMatchIndex >= 0) {
+        if (customMatched) {
+            targetSsid = customSsid.c_str();
+            targetPass = customPass.c_str();
+            targetChannel = (uint8_t)WiFi.channel(bestScannedIndex);
+            targetBssid = WiFi.BSSID(bestScannedIndex);
+            Serial.printf("[WIFI BOOT] Best matching NVS AP: '%s' (RSSI: %ld dBm, Ch: %d)\n",
+                          targetSsid, (long)bestRssi, (int)targetChannel);
+        } else if (bestMatchIndex >= 0) {
             targetSsid = WIFI_NETWORKS[bestMatchIndex].ssid;
             targetPass = WIFI_NETWORKS[bestMatchIndex].password;
             targetChannel = (uint8_t)WiFi.channel(bestScannedIndex);
             targetBssid = WiFi.BSSID(bestScannedIndex);
             Serial.printf("[WIFI BOOT] Best matching AP: '%s' (RSSI: %ld dBm, Ch: %d)\n",
                           targetSsid, (long)bestRssi, (int)targetChannel);
-        } else {
-            // Fallback: If scan missed beacon or SSID was hidden, probe primary AP directly
+        } else if (customSsid.length() > 0) {
+            Serial.printf("[WIFI BOOT] Probing custom NVS AP fallback: %s\n", customSsid.c_str());
+            targetSsid = customSsid.c_str();
+            targetPass = customPass.c_str();
+        } else if (WIFI_NETWORK_COUNT > 0) {
             Serial.println(F("[WIFI BOOT] No known AP matched in scan; probing primary AP fallback..."));
             targetSsid = WIFI_NETWORKS[0].ssid;
             targetPass = WIFI_NETWORKS[0].password;
+        } else {
+            return false;
         }
 
         displayMgr.showConnectingWiFi(targetSsid);
@@ -232,6 +352,7 @@ public:
             Serial.printf("[WIFI BOOT] Uplink established to '%s'! IP: %s\n",
                           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
             configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+            setupMdns();
             return true;
         }
 
@@ -260,6 +381,7 @@ public:
                 Serial.printf(F("[WIFI] Background uplink established to '%s'! IP: %s\n"),
                               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
                 configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+                setupMdns();
             }
             return;
         }
@@ -281,6 +403,7 @@ public:
                 Serial.printf(F("[WIFI] Reconnected to '%s'! IP: %s\n"),
                               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
                 configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+                setupMdns();
                 return;
             }
 
@@ -313,24 +436,37 @@ public:
                 int bestMatch = -1;
                 int bestScanIdx = -1;
                 int32_t bestRssi = -999;
+                bool customMatched = false;
 
                 for (int i = 0; i < scanStatus; i++) {
                     String s = WiFi.SSID(i);
                     int32_t r = WiFi.RSSI(i);
+
+                    // Check custom provisioned NVS AP first
+                    if (customSsid.length() > 0 && s.equals(customSsid)) {
+                        if (r > bestRssi) {
+                            bestRssi = r;
+                            bestScanIdx = i;
+                            customMatched = true;
+                        }
+                    }
+
+                    // Check built-in configured APs
                     for (size_t j = 0; j < WIFI_NETWORK_COUNT; j++) {
                         if (s.equals(WIFI_NETWORKS[j].ssid)) {
                             if (r > bestRssi) {
                                 bestRssi = r;
                                 bestMatch = (int)j;
                                 bestScanIdx = i;
+                                customMatched = false;
                             }
                         }
                     }
                 }
 
-                if (bestMatch >= 0) {
-                    const char* targetSsid = WIFI_NETWORKS[bestMatch].ssid;
-                    const char* targetPass = WIFI_NETWORKS[bestMatch].password;
+                if (customMatched || bestMatch >= 0) {
+                    const char* targetSsid = customMatched ? customSsid.c_str() : WIFI_NETWORKS[bestMatch].ssid;
+                    const char* targetPass = customMatched ? customPass.c_str() : WIFI_NETWORKS[bestMatch].password;
                     uint8_t chan = (uint8_t)WiFi.channel(bestScanIdx);
                     const uint8_t* bssid = WiFi.BSSID(bestScanIdx);
 
@@ -365,11 +501,11 @@ public:
         }
     }
 
-    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole, String &targetName) {
+    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole, String &targetName, bool &outQuietMode) {
         if (!isConnected()) return false;
 
         HTTPClient http;
-        String url = String(BACKEND_BASE_URL) + "/hardware/status/" + String(TERMINAL_ID);
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/status/" + String(TERMINAL_ID);
         http.begin(url);
         http.addHeader("x-api-key", HARDWARE_API_KEY);
         http.setTimeout(2500);
@@ -387,6 +523,7 @@ public:
                 enrollmentActive = doc["enrollment"]["active"] | false;
                 targetRole = doc["enrollment"]["targetRole"] | "STUDENT";
                 targetName = doc["enrollment"]["targetName"] | "";
+                outQuietMode = doc["isQuietMode"] | doc["session"]["isQuietMode"] | false;
 
                 // Parse authorized faculty instructor list and update local offline cache
                 if (doc["authorizedFaculty"].is<JsonArray>()) {
@@ -412,6 +549,50 @@ public:
         return success;
     }
 
+    bool syncTerminalStatus(bool &isLocked, String &sectionCode, bool &enrollmentActive, String &targetRole, String &targetName) {
+        bool dummyQuiet = false;
+        return syncTerminalStatus(isLocked, sectionCode, enrollmentActive, targetRole, targetName, dummyQuiet);
+    }
+
+    bool postHeartbeat(int rssi, uint32_t freeHeap, uint32_t uptimeSec, const char* readerStatus, const char* version, bool &outQuietMode) {
+        if (!isConnected()) return false;
+
+        HTTPClient http;
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/heartbeat";
+        http.begin(url);
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("x-api-key", HARDWARE_API_KEY);
+        http.setTimeout(2500);
+
+        JsonDocument reqDoc;
+        reqDoc["terminalId"] = TERMINAL_ID;
+        reqDoc["rssi"] = rssi;
+        reqDoc["freeHeap"] = freeHeap;
+        reqDoc["uptimeSec"] = uptimeSec;
+        reqDoc["readerStatus"] = (readerStatus && strlen(readerStatus) > 0) ? readerStatus : "OK";
+        reqDoc["version"] = (version && strlen(version) > 0) ? version : "v1.0.4";
+
+        String reqJson;
+        serializeJson(reqDoc, reqJson);
+
+        int httpCode = http.POST(reqJson);
+        bool success = false;
+
+        if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+            String resJson = http.getString();
+            JsonDocument resDoc;
+            DeserializationError err = deserializeJson(resDoc, resJson);
+            if (!err) {
+                if (resDoc["data"]["isQuietMode"].is<bool>()) {
+                    outQuietMode = resDoc["data"]["isQuietMode"].as<bool>();
+                }
+                success = true;
+            }
+        }
+        http.end();
+        return success;
+    }
+
     bool postRfidTap(const String &rfidUid, TerminalApiResponse &outResponse) {
         if (!isConnected()) {
             outResponse.httpCode = 0;
@@ -421,7 +602,7 @@ public:
         }
 
         HTTPClient http;
-        String url = String(BACKEND_BASE_URL) + "/hardware/tap";
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/tap";
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
@@ -485,7 +666,7 @@ public:
         }
 
         HTTPClient http;
-        String url = String(BACKEND_BASE_URL) + "/hardware/select-section";
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/select-section";
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
@@ -533,7 +714,7 @@ public:
         }
 
         HTTPClient http;
-        String url = String(BACKEND_BASE_URL) + "/hardware/otp";
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/otp";
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);
@@ -576,7 +757,7 @@ public:
         if (!isConnected()) return false;
 
         HTTPClient http;
-        String url = String(BACKEND_BASE_URL) + "/hardware/offline-sync";
+        String url = resolveBackendUrl(getBackendUrl()) + "/hardware/offline-sync";
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-api-key", HARDWARE_API_KEY);

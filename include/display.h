@@ -516,6 +516,40 @@ public:
 
         display.display();
     }
+
+    /**
+     * Captive Portal Wi-Fi Provisioning Screen
+     */
+    void showCaptivePortal(const char* apSsid, const char* ipStr = "192.168.4.1") {
+        display.clearDisplay();
+
+        drawHeader("WI-FI SETUP PORTAL");
+
+        printCentered("CONNECT TO AP:", 16, 1, SSD1306_WHITE, 20);
+        printCentered(apSsid, 27, 1, SSD1306_WHITE, 20);
+
+        char ipBuf[24];
+        snprintf(ipBuf, sizeof(ipBuf), "HTTP://%s", ipStr);
+        printCentered(ipBuf, 39, 1, SSD1306_WHITE, 20);
+
+        display.drawLine(0, 51, SCREEN_WIDTH, 51, SSD1306_WHITE);
+        printCentered("PRESS * TO REBOOT", 54, 1, SSD1306_WHITE, 21);
+
+        display.display();
+    }
+
+    /**
+     * Transient notice when Lecture Quiet Mode is toggled via matrix keypad 'C'
+     */
+    void showQuietModeNotice(bool isQuiet) {
+        display.clearDisplay();
+        drawHeader("LECTURE QUIET MODE");
+        printCentered(isQuiet ? "QUIET MODE: ON" : "QUIET MODE: OFF", 22, 1, SSD1306_WHITE, 20);
+        printCentered(isQuiet ? "Audio Dampened" : "Normal Audio Restored", 36, 1, SSD1306_WHITE, 20);
+        display.drawLine(0, 48, SCREEN_WIDTH, 48, SSD1306_WHITE);
+        printCentered("KEYPAD SHORTCUT: 'C'", 52, 1, SSD1306_WHITE, 20);
+        display.display();
+    }
 };
 
 extern DisplayManager displayMgr;

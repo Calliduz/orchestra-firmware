@@ -34,15 +34,18 @@
 #include "display.h"
 #include "offline_storage.h"
 #include "network_client.h"
+#include "captive_portal.h"
 
 // Instantiate Global Singletons
 AudioLedManager audioLed;
 DisplayManager displayMgr;
 OfflineStorageManager offlineStorage;
 OrchestraNetworkClient netClient;
+CaptivePortalManager captivePortal;
 
 // MFRC522 RFID Hardware Reader Instance
 MFRC522 mfrc522(RC522_SS_PIN, RC522_RST_PIN);
+static const char* g_readerStatus = "MFRC522 OK";
 
 // 4x4 Matrix Keypad Key Definition & Instance
 char keypadKeys[KEYPAD_ROWS][KEYPAD_COLS] = {
@@ -63,6 +66,7 @@ Keypad matrixKeypad = Keypad(
 enum TerminalState {
     STATE_BOOT,
     STATE_CONNECTING_WIFI,
+    STATE_CAPTIVE_PORTAL,     // Fallback AP / OTA Wi-Fi & backend configuration
     STATE_LOCKED,             // Hardware session interlock armed, waiting for faculty master badge
     STATE_IDLE_SCAN,          // Session open, ready to interrogate student credentials
     STATE_PACING_COOLDOWN,    // Non-blocking 3.0s anti-proxy interlock
@@ -240,6 +244,13 @@ void networkWorkerTask(void *pvParameters) {
     String lastName = enrollmentTargetName;
 
     while (true) {
+        // While captive portal SoftAP provisioning is active, pause background network operations
+        // to prevent mode switching back to STA and radio shut-off.
+        if (captivePortal.isActive()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         unsigned long now = millis();
 
         // 1. Service any pending interactive requests with top priority
@@ -304,8 +315,11 @@ void networkWorkerTask(void *pvParameters) {
                 bool cloudEnrollmentActive = lastEnrollActive;
                 String cloudTargetRole = lastRole;
                 String cloudTargetName = lastName;
+                bool cloudQuiet = audioLed.isQuiet();
 
-                if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole, cloudTargetName)) {
+                if (netClient.syncTerminalStatus(cloudIsLocked, cloudSection, cloudEnrollmentActive, cloudTargetRole, cloudTargetName, cloudQuiet)) {
+                    audioLed.setQuietMode(cloudQuiet);
+
                     bool changed = (cloudIsLocked != lastIsLocked) ||
                                    (cloudSection != lastSection) ||
                                    (cloudEnrollmentActive != lastEnrollActive) ||
@@ -371,6 +385,32 @@ void networkWorkerTask(void *pvParameters) {
             }
         }
 
+        // Cooperative yield
+        vTaskDelay(pdMS_TO_TICKS(10));
+        now = millis();
+
+        // 5. Periodic 60-Second Fleet Health Heartbeat (P5 Watchdog Telemetry)
+        // Dispatches immediately upon initial Wi-Fi connection, then every 60s
+        static unsigned long lastHeartbeatTime = 0;
+        if (netClient.isConnected() && (lastHeartbeatTime == 0 || (now - lastHeartbeatTime >= 60000))) {
+            if (netRequestQueue && uxQueueMessagesWaiting(netRequestQueue) == 0) {
+                lastHeartbeatTime = now;
+                int rssi = WiFi.RSSI();
+                uint32_t freeHeap = ESP.getFreeHeap();
+                uint32_t uptimeSec = millis() / 1000;
+
+                // Read reader status safely from cached hardware check (avoid cross-core SPI collision)
+                const char* readerStat = g_readerStatus ? g_readerStatus : "MFRC522 OK";
+
+                bool serverQuiet = audioLed.isQuiet();
+                if (netClient.postHeartbeat(rssi, freeHeap, uptimeSec, readerStat, "v1.0.4-PRO", serverQuiet)) {
+                    audioLed.setQuietMode(serverQuiet);
+                    Serial.printf(F("[HEARTBEAT] Emitted telemetry: RSSI %d dBm | FreeHeap %u bytes | Reader %s | Quiet %s\n"),
+                                  rssi, freeHeap, readerStat, serverQuiet ? "ON" : "OFF");
+                }
+            }
+        }
+
         // Cooperative yield to keep Core 0 responsive
         vTaskDelay(pdMS_TO_TICKS(15));
     }
@@ -414,8 +454,10 @@ void setup() {
     byte mfrcVersion = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
     Serial.printf(F("[HARDWARE] MFRC522 SPI Transceiver Version: 0x%02X\n"), mfrcVersion);
     if (mfrcVersion == 0x00 || mfrcVersion == 0xFF) {
+        g_readerStatus = "ERR_SPI";
         Serial.println(F("[WARNING] MFRC522 communication failed or not connected. Check SPI wiring."));
     } else {
+        g_readerStatus = "MFRC522 OK";
         // Boost MFRC522 receiver sensitivity to maximum (48 dB) for instant coupling and longer range
         mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
         mfrc522.PCD_AntennaOn();
@@ -438,21 +480,22 @@ void setup() {
         bool enrollFromCloud = false;
         String roleFromCloud = "STUDENT";
         String nameFromCloud = "";
-        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud, enrollFromCloud, roleFromCloud, nameFromCloud)) {
+        bool quietFromCloud = false;
+        if (netClient.syncTerminalStatus(lockedFromCloud, sectionFromCloud, enrollFromCloud, roleFromCloud, nameFromCloud, quietFromCloud)) {
             isTerminalLocked = lockedFromCloud;
             currentSectionCode = sectionFromCloud;
             isEnrollmentMode = enrollFromCloud;
             enrollmentTargetRole = roleFromCloud;
             enrollmentTargetName = nameFromCloud;
-            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s | Enrollment: %s (%s))\n"),
+            audioLed.setQuietMode(quietFromCloud);
+            Serial.printf(F("[CLOUD] Initial terminal state synced: %s (Section: %s | Enrollment: %s (%s) | Quiet: %s)\n"),
                           isTerminalLocked ? "LOCKED" : "OPEN", currentSectionCode.c_str(),
-                          isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF", enrollmentTargetName.c_str());
+                          isEnrollmentMode ? enrollmentTargetRole.c_str() : "OFF", enrollmentTargetName.c_str(),
+                          quietFromCloud ? "ON" : "OFF");
         }
     } else {
-        // In offline mode: shut down 2.4GHz radio to eliminate electrical noise on MFRC522 antenna
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        Serial.println(F("[WIFI] Operating in OFFLINE STANDBY mode (Radio OFF for pure 13.56MHz RFID sensitivity)."));
+        Serial.println(F("[WIFI] Configured Wi-Fi failed after retry timeout! Launching Fallback Captive Portal..."));
+        captivePortal.start(TERMINAL_ID, BACKEND_BASE_URL);
     }
 
     // 5. Initialize FreeRTOS Queues & Network Worker Task pinned to Core 0
@@ -471,7 +514,9 @@ void setup() {
     );
 
     // Initial state transition
-    if (isEnrollmentMode) {
+    if (captivePortal.isActive()) {
+        changeState(STATE_CAPTIVE_PORTAL);
+    } else if (isEnrollmentMode) {
         changeState(STATE_ENROLLMENT_SCAN);
     } else if (isTerminalLocked) {
         changeState(STATE_LOCKED);
@@ -513,6 +558,28 @@ void loop() {
 
     // 3. State Machine Dispatcher
     switch (currentState) {
+        case STATE_CAPTIVE_PORTAL: {
+            audioLed.setLeds(true, true); // Dual solid LEDs in captive portal setup
+            captivePortal.handle();
+
+            char key = matrixKeypad.getKey();
+            if (key) {
+                audioLed.playKeypadClick();
+                if (key == '*') {
+                    Serial.println(F("[CAPTIVE PORTAL] '*' pressed! Rebooting ESP32 into network sweep..."));
+                    displayMgr.showConnectingWiFi("REBOOTING...");
+                    delay(400);
+                    ESP.restart();
+                } else if (key == 'D') {
+                    Serial.println(F("[CAPTIVE PORTAL] 'D' pressed! Exiting captive portal mode on keypad request."));
+                    captivePortal.stop();
+                    WiFi.mode(WIFI_OFF);
+                    changeState(STATE_LOCKED);
+                }
+            }
+            break;
+        }
+
         case STATE_LOCKED: {
             audioLed.setLeds(false, true); // Solid red status LED during locked state
             processRfidCard();             // RFID cards are evaluated; student taps yield 403, faculty badge unlocks
@@ -620,6 +687,12 @@ void changeState(TerminalState newState) {
     getCurrent12HourClock(timeBuf, sizeof(timeBuf), dateBuf, sizeof(dateBuf));
 
     switch (newState) {
+        case STATE_CAPTIVE_PORTAL:
+            audioLed.setLeds(true, true);
+            displayMgr.showCaptivePortal(captivePortal.getApSsid().c_str(), "192.168.4.1");
+            Serial.println(F("[FSM] State -> STATE_CAPTIVE_PORTAL (Wi-Fi Provisioning AP Active)"));
+            break;
+
         case STATE_LOCKED:
             isTerminalLocked = true;
             audioLed.setLeds(false, true);
@@ -1123,6 +1196,26 @@ void handleKeypadInput() {
     } else {
         // Any other key resets the double '#' tracker
         lastHashPressTime = 0;
+    }
+
+    // Lecture Quiet Mode toggle shortcut on key 'C' during LOCKED or IDLE_SCAN
+    if ((currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN) && key == 'C') {
+        audioLed.toggleQuietMode();
+        bool q = audioLed.isQuiet();
+        Serial.printf(F("[KEYPAD] 'C' pressed! Toggled Lecture Quiet Mode: %s\n"),
+                      q ? "ON (DAMPENED AUDIO)" : "OFF (NORMAL AUDIO)");
+        displayMgr.showQuietModeNotice(q);
+        delay(700);
+        changeState(currentState);
+        return;
+    }
+
+    // Fallback Captive Portal shortcut on key 'D' during LOCKED or IDLE_SCAN
+    if ((currentState == STATE_LOCKED || currentState == STATE_IDLE_SCAN) && key == 'D') {
+        Serial.println(F("[KEYPAD] 'D' pressed! Launching Fallback Captive Portal Wi-Fi Provisioning..."));
+        captivePortal.start(TERMINAL_ID, BACKEND_BASE_URL);
+        changeState(STATE_CAPTIVE_PORTAL);
+        return;
     }
 
     // If in SECTION DISAMBIGUATION mode, process numeric choices 1..count

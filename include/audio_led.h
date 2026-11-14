@@ -5,6 +5,9 @@
 #include "config.h"
 
 class AudioLedManager {
+private:
+    volatile bool quietMode = false;
+
 public:
     void begin() {
         pinMode(LED_GREEN_PIN, OUTPUT);
@@ -21,48 +24,84 @@ public:
         digitalWrite(LED_RED_PIN, red ? HIGH : LOW);
     }
 
+    void setQuietMode(bool quiet) {
+        quietMode = quiet;
+    }
+
+    bool isQuiet() const {
+        return quietMode;
+    }
+
+    void toggleQuietMode() {
+        quietMode = !quietMode;
+    }
+
     void playKeypadClick() {
+        if (quietMode) {
+            // Suppressed in quiet mode
+            return;
+        }
         tone(BUZZER_PIN, 2800, 25);
     }
 
     void cueAccessGranted() {
-        // Default classic high crisp single confirmation beep + Green LED
         setLeds(true, false);
-        tone(BUZZER_PIN, 2200, 160);
+        if (quietMode) {
+            // Dampened subtle tick to prevent disrupting ongoing lectures
+            tone(BUZZER_PIN, 1500, 20);
+        } else {
+            // Default classic high crisp single confirmation beep
+            tone(BUZZER_PIN, 2200, 160);
+        }
     }
 
     void cueAccessDenied() {
-        // Default two low error pulses + Red LED
         setLeds(false, true);
-        tone(BUZZER_PIN, 440, 180);
-        delay(190);
-        tone(BUZZER_PIN, 380, 220);
+        if (quietMode) {
+            // Soft subtle low pulse
+            tone(BUZZER_PIN, 350, 40);
+        } else {
+            // Default two low error pulses
+            tone(BUZZER_PIN, 440, 180);
+            delay(190);
+            tone(BUZZER_PIN, 380, 220);
+        }
     }
 
     void cueSessionStateChanged(bool opened) {
-        // Default melodious chime when faculty toggles session
         if (opened) {
             setLeds(true, false);
-            tone(BUZZER_PIN, 1318, 100); // E6
-            delay(110);
-            tone(BUZZER_PIN, 1760, 120); // A6
-            delay(130);
-            tone(BUZZER_PIN, 2093, 220); // C7
+            if (quietMode) {
+                tone(BUZZER_PIN, 1760, 40);
+            } else {
+                tone(BUZZER_PIN, 1318, 100); // E6
+                delay(110);
+                tone(BUZZER_PIN, 1760, 120); // A6
+                delay(130);
+                tone(BUZZER_PIN, 2093, 220); // C7
+            }
         } else {
             setLeds(false, true);
-            tone(BUZZER_PIN, 1760, 120); // A6
-            delay(130);
-            tone(BUZZER_PIN, 1318, 120); // E6
-            delay(130);
-            tone(BUZZER_PIN, 880, 240);  // A5
+            if (quietMode) {
+                tone(BUZZER_PIN, 880, 40);
+            } else {
+                tone(BUZZER_PIN, 1760, 120); // A6
+                delay(130);
+                tone(BUZZER_PIN, 1318, 120); // E6
+                delay(130);
+                tone(BUZZER_PIN, 880, 240);  // A5
+            }
         }
     }
 
     void cuePacingViolation() {
-        // Rapid sharp warning chirp to deter proxy tapping attempts
         digitalWrite(LED_RED_PIN, HIGH);
-        tone(BUZZER_PIN, 900, 70);
-        delay(80);
+        if (quietMode) {
+            delay(50);
+        } else {
+            tone(BUZZER_PIN, 900, 70);
+            delay(80);
+        }
         digitalWrite(LED_RED_PIN, LOW);
     }
 
