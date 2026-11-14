@@ -55,6 +55,21 @@ public:
         }
     }
 
+    void cueEgressRecorded() {
+        setLeds(true, false);
+        if (quietMode) {
+            // Damped subtle double tick
+            tone(BUZZER_PIN, 1800, 25);
+            delay(50);
+            tone(BUZZER_PIN, 2200, 25);
+        } else {
+            // Gentle double confirmation tone
+            tone(BUZZER_PIN, 1760, 90);
+            delay(110);
+            tone(BUZZER_PIN, 2200, 110);
+        }
+    }
+
     void cueAccessDenied() {
         setLeds(false, true);
         if (quietMode) {

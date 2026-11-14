@@ -28,6 +28,8 @@ struct TerminalApiResponse {
     bool isRegistered;
     String cardHolder;
     String facultyUid;
+    int totalMinutes;
+    String egressTime;
     int sectionCount;
     char sectionCodes[4][24];
 };
@@ -634,6 +636,8 @@ public:
                 outResponse.isRegistered = resDoc["data"]["isRegistered"] | false;
                 outResponse.cardHolder = resDoc["data"]["cardHolderName"] | "";
                 outResponse.facultyUid = resDoc["data"]["facultyUid"] | "";
+                outResponse.totalMinutes = resDoc["data"]["totalMinutesAttended"] | resDoc["data"]["totalMinutes"] | 0;
+                outResponse.egressTime = resDoc["data"]["egressTime"] | resDoc["data"]["timeOut"] | "";
 
                 outResponse.sectionCount = 0;
                 if (resDoc["data"]["sections"].is<JsonArray>()) {
@@ -743,6 +747,8 @@ public:
                 outResponse.status = resDoc["data"]["status"] | "";
                 outResponse.sectionCode = resDoc["data"]["sectionCode"] | DEFAULT_SECTION;
                 outResponse.facultyName = resDoc["data"]["facultyName"] | "";
+                outResponse.totalMinutes = resDoc["data"]["totalMinutesAttended"] | resDoc["data"]["totalMinutes"] | 0;
+                outResponse.egressTime = resDoc["data"]["egressTime"] | resDoc["data"]["timeOut"] | "";
             }
         } else {
             outResponse.code = "ERR_HTTP_FAIL";

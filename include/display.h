@@ -247,6 +247,54 @@ public:
     }
 
     /**
+     * Egress Recorded Screen (Student Check-Out)
+     * Displays CHECK-OUT RECORDED, student name, and total minutes or time out.
+     */
+    void showEgressRecorded(const char* name, int totalMinutes, const char* timeOut = nullptr) {
+        display.clearDisplay();
+        drawHeader("CHECK-OUT RECORDED");
+
+        // Student Info
+        char cleanName[24];
+        if (name && strlen(name) > 0) {
+            strncpy(cleanName, name, 20);
+            cleanName[20] = '\0';
+        } else {
+            strcpy(cleanName, "Student Verified");
+        }
+        printCentered(cleanName, 17, 1, SSD1306_WHITE, 20);
+
+        // Duration or Exit Time
+        char durBuf[24];
+        if (totalMinutes > 0) {
+            int hrs = totalMinutes / 60;
+            int mins = totalMinutes % 60;
+            if (hrs > 0) {
+                snprintf(durBuf, sizeof(durBuf), "DURATION: %dh %02dm", hrs, mins);
+            } else {
+                snprintf(durBuf, sizeof(durBuf), "DURATION: %d mins", mins);
+            }
+        } else if (timeOut && strlen(timeOut) > 0) {
+            const char* tPos = strchr(timeOut, 'T');
+            if (tPos && strlen(tPos) >= 6) {
+                // e.g. 2026-11-14T08:26:34.919Z -> 08:26 UTC
+                snprintf(durBuf, sizeof(durBuf), "TIME: %.5s", tPos + 1);
+            } else {
+                snprintf(durBuf, sizeof(durBuf), "TIME: %.12s", timeOut);
+            }
+        } else {
+            strcpy(durBuf, "DURATION: < 1 min");
+        }
+        printCentered(durBuf, 30, 1, SSD1306_WHITE, 20);
+
+        // Status Badge Strip
+        display.drawLine(0, 45, SCREEN_WIDTH, 45, SSD1306_WHITE);
+        printCentered("EXIT CONFIRMED", 50, 1, SSD1306_WHITE, 20);
+
+        display.display();
+    }
+
+    /**
      * Clean, Pixel-Aligned Access Denied Screen
      * Displays a distinct top bar and two clean centered lines without text overflow.
      */

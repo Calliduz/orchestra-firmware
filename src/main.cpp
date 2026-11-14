@@ -135,6 +135,8 @@ struct NetResponseEvent {
     char cardHolder[48];
     char originalPayload[64];
     char facultyUid[32];
+    int totalMinutes;
+    char egressTime[24];
     int sectionCount;
     char sectionCodes[4][24];
 };
@@ -199,6 +201,10 @@ void copyApiToNetResponse(const TerminalApiResponse &api, const char* originalPa
 
     strncpy(out.facultyUid, api.facultyUid.c_str(), sizeof(out.facultyUid) - 1);
     out.facultyUid[sizeof(out.facultyUid) - 1] = '\0';
+
+    out.totalMinutes = api.totalMinutes;
+    strncpy(out.egressTime, api.egressTime.c_str(), sizeof(out.egressTime) - 1);
+    out.egressTime[sizeof(out.egressTime) - 1] = '\0';
 
     out.sectionCount = api.sectionCount;
     for (int i = 0; i < api.sectionCount && i < 4; i++) {
@@ -1009,9 +1015,15 @@ void handleCloudStatusUpdate(const CloudStatusMessage &cloudMsg) {
 
 void handleNetworkResponse(const NetResponseEvent &resp) {
     if (resp.type == NET_EVENT_KEYPAD_OTP) {
-        if (strcmp(resp.code, "ACCESS_GRANTED") == 0) {
+        if (strcmp(resp.code, "ACCESS_GRANTED") == 0 || strcmp(resp.code, "OTP_GRANTED") == 0) {
             audioLed.cueAccessGranted();
             displayMgr.showAccessGranted(resp.studentName, resp.status, resp.studentId);
+            lastStudentScanTime = millis();
+            stateAfterFeedback = STATE_PACING_COOLDOWN;
+            changeState(STATE_FEEDBACK_DISPLAY);
+        } else if (strcmp(resp.code, "EGRESS_RECORDED") == 0) {
+            audioLed.cueEgressRecorded();
+            displayMgr.showEgressRecorded(resp.studentName, resp.totalMinutes, resp.egressTime);
             lastStudentScanTime = millis();
             stateAfterFeedback = STATE_PACING_COOLDOWN;
             changeState(STATE_FEEDBACK_DISPLAY);
@@ -1112,6 +1124,14 @@ void handleNetworkResponse(const NetResponseEvent &resp) {
         // Valid student card scanned on time or late
         audioLed.cueAccessGranted();
         displayMgr.showAccessGranted(resp.studentName, resp.status, resp.studentId);
+        lastStudentScanTime = millis();
+        stateAfterFeedback = STATE_PACING_COOLDOWN; // Activate 3.0s anti-proxy interlock
+        changeState(STATE_FEEDBACK_DISPLAY);
+    }
+    else if (strcmp(resp.code, "EGRESS_RECORDED") == 0) {
+        // Student card scanned for check-out (egress)
+        audioLed.cueEgressRecorded();
+        displayMgr.showEgressRecorded(resp.studentName, resp.totalMinutes, resp.egressTime);
         lastStudentScanTime = millis();
         stateAfterFeedback = STATE_PACING_COOLDOWN; // Activate 3.0s anti-proxy interlock
         changeState(STATE_FEEDBACK_DISPLAY);
